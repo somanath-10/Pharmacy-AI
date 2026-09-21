@@ -1,1 +1,0 @@
-"""PharmaShield AI backend package."""
