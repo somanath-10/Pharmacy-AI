@@ -1,7 +1,7 @@
 """Warehouse, Inventory, Planning, Logistics routes."""
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, Request
 
 from app.core.security import get_current_principal
 from app.domains import inventory as inv_svc
@@ -28,9 +28,10 @@ async def get_grn(grn_id: str, principal: dict = Depends(get_current_principal))
 
 
 @warehouse_router.post("/grn")
-async def create_grn(payload: dict = Body(...),
+async def create_grn(request: Request,
+                     payload: dict = Body(...),
                      principal: dict = Depends(get_current_principal)):
-    idem = payload.pop("idempotency_key", None)
+    idem = payload.pop("idempotency_key", None) or request.headers.get("idempotency-key")
     return await wh_svc.create_grn(payload, principal, idem)
 
 

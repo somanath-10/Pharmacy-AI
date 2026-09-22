@@ -218,7 +218,8 @@ async def _return_warehouse(ret: dict) -> str:
 
 
 # ---------------------------------------------------------------------- recall
-async def create_recall(payload: dict, actor: dict) -> dict:
+async def create_recall(payload: dict, actor: dict,
+                        idempotency_key: Optional[str] = None) -> dict:
     """Recall notice → immediate global block + locate everywhere."""
     if not payload.get("product_id") and not payload.get("batch_ids"):
         raise ValidationFailed("Recall needs product_id or batch_ids")
@@ -328,6 +329,7 @@ async def create_recall(payload: dict, actor: dict) -> dict:
         await audit("RECALL", recall_id, "INITIATED", actor,
                     details={"batches": batch_ids})
         result = _clean(doc)
+        gate.store(result)
     return result
 
 

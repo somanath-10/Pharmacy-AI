@@ -239,7 +239,7 @@ async def batch_release(production_order_id: str, actor: dict, decision: str,
 
     if decision == "RELEASE":
         await transition("production_order", production_order_id,
-                         "production_orders", "order_id", "RELEASED", actor,
+                         "production_orders", "order_id", "BATCH_RELEASED", actor,
                          reason=reason)
         # FG batch becomes available
         from app.domains.inventory.service import ensure_batch

@@ -8,9 +8,15 @@ from app.core.database import db, now_iso, utcnow
 
 
 async def seed_demo():
-    from app.domains import compliance, crm, finance, logistics, pharmacy
-    from app.domains import procurement, production, qa, qc, reverse
-    from app.domains import sales, sourcing, vendors, warehouse
+    from app.domains import compliance as compliance_svc, crm as crm_svc, finance as finance_svc, logistics as logistics_svc
+    from app.domains import pharmacy as pharmacy_svc, production as production_svc, qa as qa_svc, qc as qc_svc
+    from app.domains import reverse as reverse_svc
+    from app.domains import sales as sales_svc, sourcing as sourcing_svc, vendors as vendors_svc, warehouse as warehouse_svc
+    finance = finance_svc
+    production = production_svc
+    reverse = reverse_svc
+    compliance = compliance_svc
+    pharmacy = pharmacy_svc
     from app.domains.inventory import service as inv
 
     sys_actor = {"type": "SYSTEM", "id": "seed"}

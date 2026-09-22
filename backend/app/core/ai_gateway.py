@@ -134,16 +134,25 @@ def offline_extract_prescription(text: str) -> Dict[str, Any]:
         data["patient_age"] = int(age.group(1))
     # "Tab Paracetamol 500mg 1-0-1 x 5 days" style lines
     for m in re.finditer(
-        r"(tab|cap|syrup|inj)?\.?\s*([A-Z][A-Za-z]+)\s+(\d{1,4})\s*mg"
-        r".{0,20}?(\d\s*-\s*\d\s*-\s*\d)?.{0,20}?(?:x\s*)?(\d+)?\s*days?",
+        r"(tab|cap|syrup|inj|bottle|vial)?\.?\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)"
+        r"\s+(\d{1,4})\s*(mg|ml|iu|mcg|g)\s*"
+        r"(\d\s*-\s*\d\s*-\s*\d)?\s*(?:x\s*)?(\d+)?\s*days?",
         text,
+        re.I,
     ):
+        strength = float(m.group(3))
+        unit = m.group(4).lower()
+        # normalise to mg where sensible (volumes/units are informational)
+        strength_mg = int(strength) if unit == "mg" else (
+            int(strength * 1000) if unit == "g" else None)
         data["medicines"].append({
             "form": (m.group(1) or "tab").lower(),
-            "name": m.group(2),
-            "strength_mg": int(m.group(3)),
-            "frequency": (m.group(4) or "").replace(" ", "") or None,
-            "duration_days": int(m.group(5)) if m.group(5) else None,
+            "name": m.group(2).strip(),
+            "strength": strength,
+            "strength_unit": unit,
+            "strength_mg": strength_mg,
+            "frequency": (m.group(5) or "").replace(" ", "") or None,
+            "duration_days": int(m.group(6)) if m.group(6) else None,
         })
     return data
 

@@ -145,6 +145,7 @@ async def receive_supplier_invoice(payload: dict, actor: dict,
             await db.db.supplier_invoices.update_one(
                 {"invoice_id": invoice_id},
                 {"$set": {"extraction": data, "status": "EXTRACTED"}})
+        gate.store(result)
     return result
 
 
@@ -161,6 +162,11 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
     if inv["status"] in ("RECEIVED", "EXTRACTED"):
         await transition("supplier_invoice", invoice_id, "supplier_invoices",
                          "invoice_id", "IN_MATCHING", actor, reason="Matching started")
+    if inv["status"] in ("MATCH_FAILED", "DISPUTED"):
+        # re-match after credit note / dispute resolution → back through IN_MATCHING
+        await transition("supplier_invoice", invoice_id, "supplier_invoices",
+                         "invoice_id", "IN_MATCHING", actor,
+                         reason="Re-match after correction")
     po = await db.db.purchase_orders.find_one({"po_id": inv["po_id"]})
     grns = [_clean(dict(g)) async for g in db.db.grns.find({"po_id": inv["po_id"]})]
 
@@ -200,10 +206,20 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
     matched = abs(total_variance) <= max(tol_amount, 0.01)
     match_type = "FOUR_WAY" if any(g.get("lines") for g in grns) else "TWO_WAY"
 
+    # credit notes already received offset the remaining variance (supplier corrected)
+    credit_total = 0.0
+    async for cn in db.db.credit_notes.find({"invoice_id": invoice_id,
+                                             "type": "CREDIT"}):
+        credit_total += float(cn.get("amount") or 0)
+    net_variance = round(total_variance - credit_total, 2)
+    matched = abs(net_variance) <= max(tol_amount, 0.01)
+
     result = {
         "type": match_type,
         "matched": matched,
-        "total_variance": round(total_variance, 2),
+        "total_variance": net_variance,
+        "gross_variance": round(total_variance, 2),
+        "credit_notes_applied": round(credit_total, 2),
         "tolerance_pct": tolerance_pct,
         "lines": line_results,
         "grn_count": len(grns),
@@ -212,7 +228,7 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
     new_status = "MATCHED" if matched else "MATCH_FAILED"
     await transition("supplier_invoice", invoice_id, "supplier_invoices",
                      "invoice_id", new_status, actor,
-                     reason=f"{match_type} variance {total_variance}")
+                     reason=f"{match_type} variance {net_variance}")
     await db.db.supplier_invoices.update_one(
         {"invoice_id": invoice_id}, {"$set": {"match": result}})
 
@@ -464,6 +480,7 @@ async def execute_payment(payment_id: str, payload: dict, actor: dict,
                 await record_node("purchase_order", inv["po_id"], "payment",
                                   f"Payment {payment_id}", "DONE", actor)
         result = await db.db.payments.find_one({"payment_id": payment_id})
+        gate.store(result)
     return _clean(result)
 
 

@@ -314,6 +314,38 @@ async def _seed_masters():
             "carrier_type": "ROAD", "rating": 4.5, "status": "ACTIVE",
             "temperature_controlled": True, "created_at": now})
 
+    # Opening stock: every RM/packaging BOM component + FGs, in the warehouse that
+    # serves their flow (RM → WH-PLANT, FG → WH-MAIN). Idempotent per product.
+    from app.domains.inventory.service import record_movement
+    opening = {
+        "RAW_MATERIAL": 2000.0,
+        "PACKAGING_MATERIAL": 5000.0,
+        "FINISHED_GOOD": 300.0,
+    }
+    system = {"type": "SYSTEM", "id": "seed"}
+    async for p in db.db.products.find({"status": "ACTIVE"}):
+        already = await db.db.inventory_movements.find_one(
+            {"product_id": p["sku"], "movement_type": "OPENING_STOCK"})
+        if already:
+            continue
+        wh = "WH-PLANT" if p["type"] in ("RAW_MATERIAL", "PACKAGING_MATERIAL") else "WH-MAIN"
+        qty = opening.get(p["type"], 0)
+        if qty <= 0:
+            continue
+        batch_id = f"OPEN-{p['sku']}"
+        await db.db.batches.update_one(
+            {"batch_id": batch_id},
+            {"$set": {"batch_id": batch_id, "product_id": p["sku"],
+                      "qa_status": "RELEASED", "blocked": False,
+                      "expiry_date": "2032-01-01", "warehouse_id": wh,
+                      "created_at": now}},
+            upsert=True)
+        await record_movement(
+            movement_type="OPENING_STOCK", product_id=p["sku"],
+            warehouse_id=wh, quantity=qty, batch_id=batch_id,
+            reference_type="SEED", reference_id="OPENING",
+            performed_by=system, note="Initial stock load")
+
 
 if __name__ == "__main__":
     demo = "--demo" in sys.argv

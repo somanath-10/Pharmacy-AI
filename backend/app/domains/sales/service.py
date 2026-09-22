@@ -217,6 +217,7 @@ async def create_sales_order(payload: dict, actor: dict,
             {"$set": {"sales_order_id": order_id, "status": "CONVERTED"}})
         await record_node("sales_order", order_id, "po_intake",
                           "Customer PO (Doc AI)", "DONE", actor)
+        gate.store(result)
     return result
 
 
@@ -370,6 +371,7 @@ async def invoice_order(order_id: str, actor: dict,
         await bus.publish("invoice.issued",
                           {"invoice_id": invoice_id, "order_id": order_id}, actor)
         result = _clean(doc)
+        gate.store(result)
     return result
 
 

@@ -151,7 +151,7 @@ async def run_mrp(payload: dict, actor: Optional[dict] = None) -> dict:
             }
             await db.db.planning_proposals.insert_one(prop)
             proposals.append(prop)
-            await bus.publish(f"planning.{plan['action.lower()]}_proposed",
+            await bus.publish(f"planning.{plan['action'].lower()}_proposed",
                               {"proposal_id": prop["proposal_id"],
                                "product_id": sku,
                                "quantity": plan["net_requirement"]}, actor)

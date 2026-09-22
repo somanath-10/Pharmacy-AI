@@ -155,6 +155,7 @@ async def create_grn(payload: dict, actor: dict,
         await record_node("purchase_order", po["po_id"], "grn", "GRN Posted",
                           "DONE", actor)
         result = _clean(doc)
+        gate.store(result)
     return result
 
 
@@ -281,7 +282,7 @@ async def confirm_pick(task_id: str, actor: dict,
             {"$set": {"status": "PACKED"}})
         await bus.publish("order.picked",
                           {"sales_order_id": task["sales_order_id"]}, actor)
-    return await _clean(dict(await db.db.pick_tasks.find_one({"task_id": task_id})))
+    return _clean(dict(await db.db.pick_tasks.find_one({"task_id": task_id})))
 
 
 async def pack(payload: dict, actor: dict) -> dict:

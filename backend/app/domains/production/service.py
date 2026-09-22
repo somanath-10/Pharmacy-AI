@@ -71,6 +71,7 @@ async def create_production_order(payload: dict, actor: dict,
         await audit("PRODUCTION_ORDER", order_id, "CREATED", actor,
                     details={"batch": batch_id, "bom": bom["version"]})
         result = _clean(doc)
+        gate.store(result)
     return result
 
 
@@ -98,7 +99,7 @@ async def reserve_materials(order_id: str, actor: dict) -> dict:
         r = await inventory.reserve(comp["sku"], qty, "PRODUCTION_ORDER",
                                     order_id, actor=actor)
         reservations.append({"sku": comp["sku"], "quantity": qty,
-                             "reservation_id": str(r["_id"]),
+                             "reservation_id": r["reservation_id"],
                              "allocation": r["allocation"]})
     await db.db.production_orders.update_one(
         {"order_id": order_id},
@@ -182,6 +183,11 @@ async def equipment_gate(order_id: str, actor: dict) -> dict:
 
 async def start_batch(order_id: str, actor: dict) -> dict:
     order = await _get(order_id)
+    if order["status"] == "DISPENSING":
+        # batch start IS the dispensing → in-process transition
+        await transition("production_order", order_id, "production_orders",
+                         "order_id", "IN_PROCESS", actor, reason="Batch start")
+    order = await _get(order_id)
     if order["status"] != "IN_PROCESS":
         raise ConflictError(f"Order not IN_PROCESS: {order['status']}")
     await equipment_gate(order_id, actor)
@@ -228,6 +234,11 @@ async def complete_production(order_id: str, actual_yield: float, actor: dict) -
     await _ebmr_step(order_id, "YIELD_RECONCILIATION",
                      {"planned": order["batch_size"], "actual": actual_yield,
                       "yield_pct": yield_pct}, actor)
+    # walk IN_PROCESS → PACKAGING (implicit for single-stage) → COMPLETED
+    if order["status"] == "IN_PROCESS":
+        await transition("production_order", order_id, "production_orders",
+                         "order_id", "PACKAGING", actor,
+                         reason="Single-stage completion")
     await transition("production_order", order_id, "production_orders", "order_id",
                      "COMPLETED", actor, reason=f"Yield {yield_pct}%")
     await transition("production_order", order_id, "production_orders", "order_id",

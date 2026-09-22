@@ -199,6 +199,10 @@ async def log_requests(request, call_next):
     import uuid
 
     request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
+    # Idempotency-Key header → available to domain services as request.state.idem_key
+    idem = request.headers.get("idempotency-key")
+    if idem:
+        request.state.idem_key = idem
     start = time.time()
     response = await call_next(request)
     dur = int((time.time() - start) * 1000)

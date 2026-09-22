@@ -119,6 +119,10 @@ async def dispatch_shipment(shipment_id: str, payload: dict, actor: dict) -> dic
     shp = await _get_shipment(shipment_id)
     if shp["status"] not in ("PLANNED", "LOADING"):
         raise ConflictError(f"Shipment {shipment_id} status {shp['status']}")
+    # walk PLANNED → LOADING → DISPATCHED (load-check is implicit at dispatch)
+    if shp["status"] == "PLANNED":
+        await transition("shipment", shipment_id, "shipments", "shipment_id",
+                         "LOADING", actor, reason="Loading at dock")
     await transition("shipment", shipment_id, "shipments", "shipment_id",
                      "DISPATCHED", actor, reason="Dispatched from warehouse")
     await transition("shipment", shipment_id, "shipments", "shipment_id",
@@ -153,6 +157,11 @@ async def track(shipment_id: str, event: str, payload: dict, actor: dict) -> dic
         await bus.publish("delivery.completed",
                           {"shipment_id": shipment_id,
                            "sales_order_id": shp["sales_order_id"]}, actor)
+        # interlink: shipment delivery → sales order DELIVERED
+        if shp.get("sales_order_id"):
+            from app.domains.sales.service import mark_delivered
+
+            await mark_delivered(shp["sales_order_id"], actor)
     return await _get_shipment(shipment_id)
 
 

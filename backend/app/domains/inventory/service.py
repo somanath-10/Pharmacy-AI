@@ -15,8 +15,9 @@ from app.core.sequences import next_movement_id
 
 MOVEMENT_TYPES = {
     # inflow
-    "PURCHASE_RECEIPT": 1, "PRODUCTION_RECEIPT": 1, "SALES_RETURN_RESTOCK": 1,
-    "TRANSFER_IN": 1, "PRODUCTION_RETURN": 1, "POSITIVE_ADJUSTMENT": 1,
+    "OPENING_STOCK": 1, "PURCHASE_RECEIPT": 1, "PRODUCTION_RECEIPT": 1,
+    "SALES_RETURN_RESTOCK": 1, "TRANSFER_IN": 1, "PRODUCTION_RETURN": 1,
+    "POSITIVE_ADJUSTMENT": 1,
     # outflow
     "SALE": -1, "MATERIAL_ISSUE": -1, "TRANSFER_OUT": -1, "RTV": -1,
     "DAMAGE": -1, "EXPIRY_WRITE_OFF": -1, "DISPENSE": -1, "SAMPLE": -1,
@@ -84,10 +85,11 @@ async def record_movement(
         await ensure_batch(product_id, batch_id, None)
         batch = await db.db.batches.find_one({"batch_id": batch_id})
         # Blocked batches may only RECEIVE stock (quarantine intake, returns intake,
-        # production FG quarantine) or shed it via write-off/destruction flows.
+        # production FG quarantine) or shed it via write-off/destruction/RTV flows.
         INTAKE_WHILE_BLOCKED = {
             "PURCHASE_RECEIPT", "FG_RECEIPT", "RETURN_RECEIPT", "TRANSFER_IN",
-            "NEGATIVE_ADJUSTMENT", "DESTRUCTION", "PRODUCTION_RETURN",
+            "NEGATIVE_ADJUSTMENT", "DESTRUCTION", "PRODUCTION_RETURN", "RTV",
+            "EXPIRY_WRITE_OFF", "SAMPLE",
         }
         if batch.get("blocked") and movement_type not in INTAKE_WHILE_BLOCKED:
             raise ConflictError(
@@ -255,11 +257,12 @@ async def reserve(product_id: str, quantity: float, reference_type: str,
         "updated_at": now_iso(),
     }
     res = await db.db.reservations.insert_one(doc)
-    doc["_id"] = res.inserted_id
+    doc["reservation_id"] = str(res.inserted_id)
+    doc.pop("_id", None)
     await bus.publish("inventory.reserved", {
         "product_id": product_id, "quantity": quantity, "reference": reference_id,
     })
-    return _clean(doc)
+    return doc
 
 
 async def release_reservation(reference_type: str, reference_id: str,

@@ -143,6 +143,12 @@ async def pharmacist_review(rx_id: str, decision: str, notes: str,
     review = {"decision": decision, "notes": notes, "pharmacist": actor,
               "at": now_iso()}
     if decision == "APPROVE":
+        # pharmacist review is the authority gate: VALIDATED/CLARIFICATION →
+        # PHARMACIST_REVIEW → APPROVED
+        if rx["status"] in ("VALIDATED", "CLARIFICATION"):
+            await transition("prescription", rx_id, "prescriptions", "rx_id",
+                             "PHARMACIST_REVIEW", actor,
+                             reason="Pharmacist sign-off")
         await transition("prescription", rx_id, "prescriptions", "rx_id",
                          "APPROVED", actor, reason=notes)
         await db.db.prescriptions.update_one(
@@ -231,6 +237,7 @@ async def dispense(payload: dict, actor: dict,
         await audit("DISPENSE", disp_id, "COMPLETED", actor,
                     details={"rx": rx_id})
         result = doc
+        gate.store(result)
     return result
 
 

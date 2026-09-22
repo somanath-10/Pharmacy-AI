@@ -52,6 +52,7 @@ async def create_pr(payload: dict, actor: dict, idempotency_key: Optional[str] =
         }
         await db.db.purchase_requisitions.insert_one(doc)
         await audit("PR", pr_id, "CREATED", actor, new_state="DRAFT")
+        gate.store(_clean(doc))
         return _clean(doc)
 
 
@@ -164,6 +165,7 @@ async def create_po(payload: dict, actor: dict, idempotency_key: Optional[str] =
         await db.db.purchase_orders.insert_one(doc)
         await audit("PURCHASE_ORDER", po_id, "CREATED", actor, new_state="DRAFT")
         result = _clean(doc)
+        gate.store(result)
 
     # record node for workflow viewer
     await record_node("purchase_order", po_id, "po_draft", "PO Created", "DONE", actor)
@@ -351,6 +353,7 @@ async def convert_pr(pr_id: str, payload: dict, actor: dict,
                          "pr_id", "CONVERTED", actor, reason=f"Converted to {po['po_id']}")
         await db.db.purchase_requisitions.update_one(
             {"pr_id": pr_id}, {"$set": {"po_id": po["po_id"]}})
+        gate.store(po)
     return po
 
 
