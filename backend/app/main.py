@@ -186,8 +186,10 @@ async def sanitize_response(request, call_next):
             pass
         from starlette.responses import Response as _Resp
 
+        headers = {k: v for k, v in response.headers.items()
+                   if k.lower() not in ("content-length",)}
         return _Resp(content=body, status_code=response.status_code,
-                     headers=dict(response.headers),
+                     headers=headers,
                      media_type="application/json")
     return response
 

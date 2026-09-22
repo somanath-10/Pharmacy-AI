@@ -147,7 +147,10 @@ def offline_extract_prescription(text: str) -> Dict[str, Any]:
             int(strength * 1000) if unit == "g" else None)
         data["medicines"].append({
             "form": (m.group(1) or "tab").lower(),
-            "name": m.group(2).strip(),
+            "name": re.sub(
+                r"^(tab|tabs|tablet|tablets|cap|caps|capsule|capsules|syrup|"
+                r"inj|injection|bottle|vial)\s+", "", m.group(2).strip(),
+                flags=re.I),
             "strength": strength,
             "strength_unit": unit,
             "strength_mg": strength_mg,

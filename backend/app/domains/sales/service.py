@@ -89,7 +89,7 @@ async def send_quotation(quote_id: str, actor: dict) -> dict:
 
 async def _do_send_quote(payload: dict, actor: dict) -> dict:
     quote_id = payload["quote_id"]
-    await transition("sales_order", quote_id, "quotations", "quote_id", "SENT", actor,
+    await transition("quotation", quote_id, "quotations", "quote_id", "SENT", actor,
                      reason="Quotation sent to customer")
     q = await _get_quote(quote_id)
     from app.core.notifications import notify

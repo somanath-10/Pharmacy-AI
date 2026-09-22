@@ -10,7 +10,7 @@ from app.core.database import db, now_iso, utcnow
 async def seed_demo():
     from app.domains import compliance as compliance_svc, crm as crm_svc, finance as finance_svc, logistics as logistics_svc
     from app.domains import pharmacy as pharmacy_svc, production as production_svc, qa as qa_svc, qc as qc_svc
-    from app.domains import reverse as reverse_svc
+    from app.domains import procurement as procurement_svc, reverse as reverse_svc, safety as safety_svc
     from app.domains import sales as sales_svc, sourcing as sourcing_svc, vendors as vendors_svc, warehouse as warehouse_svc
     finance = finance_svc
     production = production_svc
@@ -31,10 +31,20 @@ async def seed_demo():
     wh_actor = {"type": "USER", "id": "warehouse@pharmaos.local",
                 "roles": ["WAREHOUSE"]}
     sales_actor = {"type": "USER", "id": "sales@pharmaos.local", "roles": ["SALES"]}
+    admin_actor = {"type": "USER", "id": "admin@pharmaos.local", "roles": ["SUPER_ADMIN"]}
+
+    async def decide_pending(entity_id: str, decision: str = "APPROVED"):
+        """Human Decision Queue resolution: the demo manager decides the item."""
+        item = await db.db.approvals.find_one(
+            {"entity_id": entity_id, "status": "PENDING"})
+        if item:
+            from app.core.approvals import decide
+            await decide(item["approval_id"], decision, admin_actor,
+                         "Demo manager decision")
+        return item
 
     if await db.db.demo_marker.find_one({"name": "demo_v1"}):
         return {"skipped": True}
-    await db.db.demo_marker.insert_one({"name": "demo_v1", "at": now_iso()})
 
     fg_para = await db.db.products.find_one({"name": "Paracetamol 500mg Tablets"})
     fg_azi = await db.db.products.find_one({"name": "Azithromycin 500mg Tablets"})
@@ -143,7 +153,9 @@ async def seed_demo():
         "lines": [{"sku": api_para["sku"], "quantity": 500, "unit_price": 880}],
         "department": "PLANT"}, buyer)
     await procurement_svc.submit_pr(pr["pr_id"], buyer)
+    await decide_pending(pr["pr_id"])          # manager approves in the queue
     po1 = await procurement_svc.convert_pr(pr["pr_id"], {}, buyer)
+    await decide_pending(po1["po_id"])         # manager approves high-value PO
     await procurement_svc.send_po(po1["po_id"], buyer)
     await procurement_svc.acknowledge_po(po1["po_id"], {"accepted": True},
                                          {"type": "VENDOR", "id": acme["vendor_id"]})
@@ -188,6 +200,7 @@ async def seed_demo():
     pay1 = await finance.create_payment_proposal(
         {"invoice_ids": [inv1["invoice_id"]]}, finance_actor)
     await finance.authorize_payment(pay1["payment_id"], finance_actor)
+    await decide_pending(pay1["payment_id"])   # manager authorizes large payment
     await finance.execute_payment(pay1["payment_id"], {}, finance_actor,
                                   idempotency_key="demo-pay1")
 
@@ -196,6 +209,7 @@ async def seed_demo():
         "vendor_id": globallabs["vendor_id"],
         "lines": [{"sku": fg_azi["sku"], "quantity": 1000}]}, buyer)
     await procurement_svc.submit_po_for_approval(po2["po_id"], buyer)
+    await decide_pending(po2["po_id"])
     await procurement_svc.send_po(po2["po_id"], buyer)
     await procurement_svc.acknowledge_po(po2["po_id"], {"accepted": True},
                                          {"type": "VENDOR",
@@ -216,6 +230,10 @@ async def seed_demo():
     await qc_svc.enter_results(s2["sample_id"], [
         {"name": "description", "result": "Film coated"},
         {"name": "assay", "result": 97.1}], qc_actor)
+    # assay out of spec → OOS investigation → retest passes → review completes
+    await qc_svc.close_oos(s2["sample_id"], {
+        "conclusion": "Analyst error in first assay; retest 99.4% within spec"},
+        qa_actor)
     await qc_svc.complete_review(s2["sample_id"], qc_actor)
     # QA accepts only 970 → 30 rejected
     await qc_svc.disposition_grn_line(grn2["grn_id"], 1, 970, 30,
@@ -290,7 +308,11 @@ async def seed_demo():
                               {"location": "Sunrise Hospital"}, wh_actor)
     await logistics_svc.capture_pod(shp["shipment_id"],
                                     {"received_by": "Store Manager"}, wh_actor)
-    await sales_svc.mark_delivered(so1["order_id"], wh_actor)
+    # delivery already propagates to the sales order via the shipment interlink;
+    # only mark it if the order isn't there yet (e.g. delivery recorded first)
+    so_now = await sales_svc.get_order(so1["order_id"])
+    if so_now["status"] == "DISPATCHED":
+        await sales_svc.mark_delivered(so1["order_id"], wh_actor)
     await sales_svc.invoice_order(so1["order_id"], sales_actor)
     cinv = await db.db.customer_invoices.find_one(
         {"sales_order_id": so1["order_id"]})
@@ -366,5 +388,8 @@ async def seed_demo():
     from app.domains.planning.service import run_mrp
 
     await run_mrp({}, agent)
+
+    # marker written last: a crashed seed run retries on next boot
+    await db.db.demo_marker.insert_one({"name": "demo_v1", "at": now_iso()})
 
     return {"ok": True}

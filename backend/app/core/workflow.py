@@ -111,6 +111,17 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
         "SCHEDULED",
     ),
     StateMachine(
+        "quotation",
+        {
+            "DRAFT": ["SENT", "CANCELLED"],
+            "SENT": ["ACCEPTED", "CONVERTED", "CANCELLED"],
+            "ACCEPTED": ["CONVERTED", "CANCELLED"],
+            "CONVERTED": [],
+            "CANCELLED": [],
+        },
+        "DRAFT",
+    ),
+    StateMachine(
         "sales_order",
         {
             "DRAFT": ["CONFIRMED", "CANCELLED"],

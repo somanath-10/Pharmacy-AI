@@ -1,105 +1,139 @@
-# Pharma / Pharmacy AI Operating System
+# Pharma AI OS — Autonomous Enterprise Core
 
-An AI-native pharmaceutical & pharmacy enterprise operating system covering the complete business lifecycle:
-
-**Market → Lead → Inquiry → Quotation → Customer PO → Sales Order → Supply Planning → Sourcing → Procurement → ASN → Inbound → Receiving → QC/QA → Inventory → Production → FG Release → Allocation → (Pharmacy Dispensing) → Pick/Pack → Logistics → Delivery → Invoice → Payment → Reconciliation → Post-Market Safety**
-
-…with Finance, Quality, Compliance, Audit, Documents, Traceability, Returns, Recall, Pharmacovigilance and **AI agents** running horizontally across everything.
-
-## Core principle
+One AI-native pharmaceutical / pharmacy operating system covering **Market-to-Order, Supply
+Planning, Source-to-Contract, Purchase-to-Pay, Warehouse & Inventory, QA/QC, Manufacturing,
+Pharmacy Dispensing, Order-to-Cash, Logistics, Finance, Reverse Logistics, Post-Market Safety,
+Compliance and Audit** — in a single application, with AI agents removing routine human work.
 
 ```
-NORMAL WORK  ──▶  AI Agents + Rules + Workflow Engine  ──▶  Automatically executed
-IMPORTANT / REGULATED / PHYSICAL / EXCEPTION  ──▶  Human Decision Queue
+NORMAL WORK                    IMPORTANT / REGULATED / PHYSICAL / EXCEPTION
+     ↓                                      ↓
+AI Agents + Rules + Workflow          Human Decision Queue
+     ↓                                      ↓
+Automatically Execute                 Human approves / reviews / rejects
 ```
-
-Humans approve, review and reject. AI does the rest. Agents never write to MongoDB directly — every agent action passes through the **Agent Tool Gateway → Policy Engine → Approval Engine → Domain API → validated transaction → domain event → audit log** chain.
 
 ## Stack
 
-| Layer | Technology |
-|---|---|
-| Frontend | React 18 + Vite + React Router |
-| Backend | Python 3.12 + FastAPI (modular monolith) |
-| Database | MongoDB (strict schemas, indexes, versioning, idempotency, append-only ledgers) |
-| Cache/Locks | Redis (optional at dev time — in-process fallback) |
-| Documents | S3-compatible object storage / MinIO (GridFS/local fallback) |
-| AI | OpenAI API (deterministic offline fallback when key absent) |
-| Auth | JWT / OAuth2 + RBAC + policy-based authorization + segregation of duties |
-| Deploy | Docker + Docker Compose |
-| Observability | Structured JSON logs, request IDs, health endpoints |
+| Layer      | Technology |
+|------------|------------|
+| Frontend   | React 19 + Vite + React Router (reference blue palette design system) |
+| Backend    | Python 3.13 + FastAPI, modular monolith (`backend/app/domains/*`) |
+| Database   | MongoDB (transactions, unique indexes, append-only ledgers, optimistic versioning) |
+| AI         | OpenAI gateway with deterministic offline fallbacks (`app/core/ai_gateway.py`) |
+| Platform   | Workflow/state-machine engine, policy engine, approval engine, event outbox, audit, notifications (simulated email) |
+| Deployment | Docker + docker-compose (mongo, redis, api, nginx-served web) |
 
-## Repository layout
+## Run it
 
-```
-pharmacy_ai_os/
-├── frontend/          React app (10 workspaces + AI Command Center + Human Decision Queue)
-├── backend/           FastAPI modular monolith
-│   └── app/
-│       ├── core/      config, db, security, events+outbox, workflow engine, policy/approval
-│       │              engines, audit, notifications, storage, AI gateway, Document AI
-│       ├── domains/   masters, crm, sales, planning, vendors, sourcing, procurement,
-│       │              logistics, warehouse, inventory, qc, qa, production, pharmacy,
-│       │              finance, reverse, safety, compliance
-│       ├── agents/    tool gateway, supervisor, domain agents
-│       └── seed/      demo/master data seeding
-├── docs/              00–15 frozen architecture documents
-├── infrastructure/    docker assets, mongo init, nginx
-├── scripts/           dev / seed / test scripts
-├── docker-compose.yml
-└── Makefile
-```
-
-## Quickstart (Docker)
+### Local (no Docker)
 
 ```bash
-cp .env.example .env
-docker compose up --build
-# Backend  http://localhost:8000/docs
-# Frontend http://localhost:5173
-```
-
-## Quickstart (local dev)
-
-```bash
-# 1. MongoDB on :27017 (and optionally Redis on :6379)
-# 2. Backend
+# 1. Backend — master seed only
 cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp ../.env.example ../.env   # adjust as needed
-uvicorn app.main:app --reload --port 8000
+../.venv/bin/python -m uvicorn app.main:app --port 8000   # venv at repo root
 
-# 3. Seed demo data (idempotent)
-python -m app.seed.run
+# 2. Backend — with rich demo dataset (recommended for the UI)
+SEED_DEMO=1 ../.venv/bin/python -m uvicorn app.main:app --port 8000
 
-# 4. Frontend
-cd ../frontend
-npm install
-npm run dev
+# 3. Frontend
+cd frontend
+npm install && npm run dev          # http://localhost:5173 (proxies /api → :8000)
 ```
 
-### Demo logins (seeded)
-
-| Role | Email | Password |
-|---|---|---|
-| Super Admin | admin@pharmaos.local | Admin@123 |
-| Procurement | buyer@pharmaos.local | Buyer@123 |
-| QA Manager | qa@pharmaos.local | Qa@123 |
-| QC Analyst | qc@pharmaos.local | Qc@123 |
-| Pharmacist | pharmacist@pharmaos.local | Pharm@123 |
-| Finance | finance@pharmaos.local | Fin@123 |
-| Warehouse | warehouse@pharmaos.local | Wh@123 |
-| Sales | sales@pharmaos.local | Sales@123 |
-| Vendor Portal | vendor@acmecorp.com | Vendor@123 |
-
-## Run tests
+### Docker
 
 ```bash
-cd backend && pytest -q            # end-to-end workflow tests (P2P, O2C, production, recall, idempotency…)
-cd frontend && npm run build
+make up        # builds and starts mongo + redis + api + web
+# UI:  http://localhost:8080     API docs: http://localhost:8000/docs
 ```
 
-## Documentation
+### Demo accounts (seeded)
 
-Start with `docs/00_PROJECT_BLUEPRINT.md`, then `docs/01_MASTER_ARCHITECTURE.md`. The full document index is in `docs/README.md`.
+| Login | Password | Role |
+|---|---|---|
+| admin@pharmaos.local | Admin@123 | Super Admin |
+| buyer@pharmaos.local | Buyer@123 | Procurement / Buyer |
+| qa@pharmaos.local | Qa@123 | QA authority |
+| qc@pharmaos.local | Qc@123 | QC analyst |
+| pharmacist@pharmaos.local | Pharm@123 | Pharmacist |
+| finance@pharmaos.local | Fin@123 | Finance |
+| warehouse@pharmaos.local | Wh@123 | Warehouse |
+| sales@pharmaos.local | Sales@123 | Sales |
+| vendor@acmecorp.com | Vendor@123 | Supplier portal |
+
+## Workspaces (UI)
+
+1. **AI Command Center** — KPIs, live inputs, AI orchestration core, outputs & actions, department health, decision queue
+2. **Customers & Sales** — CRM, quotations, customer PO intake (Document AI), sales orders, O2C
+3. **Supply Chain** — MRP proposals, transfer-vs-buy, planning
+4. **Vendors & Procurement** — vendor lifecycle, sourcing events, RFQ/auction, PR → PO, receipts
+5. **Warehouse & Inventory** — ASN → GRN → QC quarantine → putaway, ledger, batches, FEFO
+6. **Quality** — QC/LIMS samples, OOS, QA dispositions, deviations/CAPA, batch release
+7. **Plant / Production** — production orders, material reservation, eBMR steps, equipment gates
+8. **Pharmacy** — prescription upload (AI extraction), pharmacist review, dispensing, POS
+9. **Logistics** — shipments, dispatch, tracking, POD
+10. **Finance & Governance** — supplier invoices, 4-way match, payments, reconciliation, credit notes, audit
+
+Plus **Human Decision Queue** (approve/review/reject with assembled evidence) and **Workflow
+Viewer** (per-entity lifecycle timeline with agent/user, reasons, timestamps).
+
+## Backend layout
+
+```
+backend/app/
+├── api/          # FastAPI routers per module
+├── core/         # config, database, security/rbac, workflow engine, policies,
+│                 # approvals (+ human callbacks), events/outbox, audit, idempotency,
+│                 # docai, ai_gateway, notifications, storage
+├── domains/      # sales, crm, planning, vendors, sourcing, procurement, inventory,
+│                 # warehouse, qc, qa, production, pharmacy, logistics, finance,
+│                 # reverse, safety, compliance, masters, analytics
+├── agents/       # agent gateway: permission check → policy → domain API → audit
+└── seed/         # idempotent master seed + rich demo lifecycle dataset
+```
+
+## Tests
+
+```bash
+cd backend && ../.venv/bin/python -m pytest tests/ -q     # 16 workflow/E2E tests
+```
+
+Covers: full P2P (PR→PO→ASN→GRN→QC→QA→putaway→invoice→4-way match→payment), partial QA
+rejection + credit note re-match, OOS investigation, production with material reservation +
+equipment gates + eBMR, O2C with shipment delivery interlink, prescription review + dispensing,
+returns/RTV/disposal, recall with global block, reconciliation, idempotency (GRN retry), RBAC
+denials and segregation of duties.
+
+## Interlinks (cross-domain wiring)
+
+- Sales order demand → MRP proposals → PR/PO/production suggestions
+- PR convert → auto vendor/contract resolution from active BPAs → PO
+- PO approval limits → Human Decision Queue with evidence
+- ASN → GRN → QC sample auto-registration → QA disposition → inventory block/unblock → putaway
+- Shipment delivery → sales order DELIVERED → customer invoice → AR → reconciliation
+- Payment execution → PO workflow timeline "payment" node DONE
+- Batch release → inventory unblock → allocation eligibility
+- Recall → global batch block → stop reservations/picks/dispense
+- Adverse event ↔ product/batch linkage; quality complaints ↔ QA/QMS
+
+## Operations
+
+- `GET /health`, `GET /health/ready`
+- Structured JSON logs with request IDs
+- Idempotency-Key middleware honoured by intake endpoints
+- Append-only inventory ledger (`inventory_movements`) as source of truth
+- Audit events on every state change with actor/policy/reason
+- Configuration via env vars — see `.env.example` and `docs/12_PRODUCTION_RUNBOOK.md`
+
+## Docs
+
+Full frozen architecture lives in `docs/00…15_*.md` (blueprint, master architecture, workflows,
+feature catalog, agent/human matrix, data model, events & states, API map, security, UI/UX,
+test plan, coverage matrix, runbook, agent tool contracts, endpoint index, validation report).
+
+## ZIP deliverable
+
+```bash
+make zip        # or: bash scripts/make_zip.sh   → pharmacy_ai_os.zip
+```

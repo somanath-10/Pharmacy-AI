@@ -127,6 +127,8 @@ async def medical_review(case_id: str, payload: dict, actor: dict) -> dict:
                              "at": now_iso()}}})
     target = "FOLLOW_UP" if payload.get("needs_follow_up") else "REPORTABLE"
     await transition("safety_case", case_id, "safety_cases", "case_id",
+                     "MEDICAL_REVIEW", actor, reason="Review recorded")
+    await transition("safety_case", case_id, "safety_cases", "case_id",
                      target, actor, reason=expectedness)
     if target == "REPORTABLE":
         await _generate_icsr(case_id, actor)
