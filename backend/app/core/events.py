@@ -1,0 +1,121 @@
+"""Event Engine: publish domain events → outbox collection → local handlers.
+
+V1 uses a MongoDB transactional outbox (no external broker). The API process
+runs a background pump; handlers are idempotent functions registered per event
+name. Events are also mirrored into `events` for the activity stream.
+"""
+import asyncio
+import logging
+from collections import defaultdict
+from typing import Any, Awaitable, Callable, Dict, List
+
+from app.core.database import db, now_iso
+
+log = logging.getLogger("pharmaos.events")
+
+Handler = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+class EventBus:
+    def __init__(self):
+        self._handlers: Dict[str, List[Handler]] = defaultdict(list)
+        self._pump_task: Optional[asyncio.Task] = None
+        self._running = False
+
+    def subscribe(self, event_name: str, handler: Handler):
+        self._handlers[event_name].append(handler)
+
+    def on(self, event_name: str):
+        def decorator(fn: Handler):
+            self.subscribe(event_name, fn)
+            return fn
+
+        return decorator
+
+    async def publish(self, name: str, payload: Dict[str, Any], actor: dict | None = None):
+        """Persist event in outbox (survives restart), then dispatch inline."""
+        event = {
+            "name": name,
+            "payload": payload,
+            "actor": actor or {"type": "SYSTEM", "id": "platform"},
+            "created_at": now_iso(),
+        }
+        await db.db.outbox_events.insert_one(
+            {
+                "name": name,
+                "payload": payload,
+                "actor": event["actor"],
+                "status": "PENDING",
+                "attempts": 0,
+                "created_at": now_iso(),
+                "processed_at": None,
+                "last_error": None,
+            }
+        )
+        # Mirror into activity stream for UI timelines
+        await db.db.events.insert_one(event)
+        await self._dispatch(name, payload, event["actor"])
+
+    async def _dispatch(self, name: str, payload: dict, actor: dict):
+        for handler in self._handlers.get(name, []):
+            try:
+                await handler(payload)
+            except Exception:
+                log.exception("handler failed event=%s handler=%s", name, handler.__name__)
+
+    async def pump_once(self, limit: int = 200) -> int:
+        """Process pending outbox rows (idempotent handlers → at-least-once OK)."""
+        cur = (
+            db.db.outbox_events.find({"status": "PENDING"})
+            .sort("created_at", 1)
+            .limit(limit)
+        )
+        processed = 0
+        async for row in cur:
+            try:
+                await self._dispatch(row["name"], row["payload"], row.get("actor"))
+                await db.db.outbox_events.update_one(
+                    {"_id": row["_id"]},
+                    {"$set": {"status": "DONE", "processed_at": now_iso()},
+                     "$inc": {"attempts": 1}},
+                )
+            except Exception as e:
+                attempts = row.get("attempts", 0) + 1
+                status = "FAILED" if attempts >= 5 else "PENDING"
+                await db.db.outbox_events.update_one(
+                    {"_id": row["_id"]},
+                    {"$set": {"status": status, "last_error": str(e)[:500]},
+                     "$inc": {"attempts": 1}},
+                )
+            processed += 1
+        return processed
+
+    async def start_pump(self):
+        if self._running:
+            return
+        self._running = True
+
+        async def _loop():
+            while self._running:
+                try:
+                    await self.pump_once()
+                except Exception:
+                    log.exception("outbox pump error")
+                await asyncio.sleep(2)
+
+        self._pump_task = asyncio.create_task(_loop())
+
+    async def stop_pump(self):
+        self._running = False
+        if self._pump_task:
+            self._pump_task.cancel()
+            self._pump_task = None
+
+
+bus = EventBus()
+
+
+def subscribe_many(mapping: Dict[str, List[Handler]]):
+    for name, handlers in mapping.items():
+        for h in handlers:
+            bus.subscribe(name, h)

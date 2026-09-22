@@ -1,0 +1,63 @@
+"""Idempotency: critical writes are safe to retry.
+
+Usage:
+    async with idempotent("GRN", key) as (first_time, prior_result):
+        if not first_time: return prior_result
+        ... do work ...
+        await store_result(...)
+"""
+from typing import Any, Optional
+
+from app.core.database import db, now_iso
+from app.core.errors import IdempotencyConflict
+
+
+async def begin(key: str, request_digest: str = "") -> dict:
+    """Returns {'first_time': bool, 'result': prior result or None}."""
+    if not key:
+        return {"first_time": True, "result": None}
+    existing = await db.db.idempotency_keys.find_one({"key": key})
+    if existing:
+        if request_digest and existing.get("digest") and existing["digest"] != request_digest:
+            raise IdempotencyConflict(
+                f"Idempotency key {key} reused with different payload",
+            )
+        return {"first_time": False, "result": existing.get("result")}
+    await db.db.idempotency_keys.insert_one(
+        {"key": key, "digest": request_digest, "result": None,
+         "status": "IN_FLIGHT", "created_at": now_iso()}
+    )
+    return {"first_time": True, "result": None}
+
+
+async def complete(key: str, result: Any):
+    if not key:
+        return
+    await db.db.idempotency_keys.update_one(
+        {"key": key},
+        {"$set": {"result": result, "status": "COMPLETED", "completed_at": now_iso()}},
+    )
+
+
+async def release(key: str):
+    if not key:
+        return
+    await db.db.idempotency_keys.delete_one({"key": key})
+
+
+class idempotent:
+    """Async context manager wrapper around begin/complete/release."""
+
+    def __init__(self, scope: str, key: Optional[str], request_digest: str = ""):
+        self.scope = scope
+        self.key = f"{scope}:{key}" if key else None
+        self.digest = request_digest
+
+    async def __aenter__(self):
+        self.state = await begin(self.key, self.digest)
+        return self.state
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.key and exc_type is not None:
+            await release(self.key)  # allow retry after failure
+        return False
