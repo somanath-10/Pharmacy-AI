@@ -550,7 +550,11 @@ async def availability(product_id: str) -> dict:
             if line.get("sku") == product_id:
                 received = float(line.get("received_qty") or 0)
                 in_transit += max(float(line.get("quantity")) - received, 0)
-    atp = max(available - reserved, 0)
+    # ATP model (P0 8.3): reserving physically moves qty AVAILABLE →
+    # RESERVED, so `available` above is ALREADY net of reservations.
+    # Subtracting active reservations again double-counted them
+    # (100 → reserve 20 reported ATP 60). ATP = AVAILABLE rows only.
+    atp = max(available, 0)
     return {"product_id": product_id, "on_hand": on_hand_total,
             "available": available, "reserved": reserved,
             "in_transit": in_transit, "available_to_promise": atp}
@@ -959,6 +963,81 @@ async def release_reservation(reference_type: str, reference_id: str,
             {"$set": {"status": "RELEASED", "updated_at": now_iso()}})
         released += res.modified_count
     return released
+
+
+async def consume_reservation_allocation(product_id: str, reference_type: str,
+                                         reference_id: str,
+                                         movement_type: str,
+                                         batch_id: str,
+                                         warehouse_id: Optional[str] = None,
+                                         location_id: Optional[str] = None,
+                                         quantity: Optional[float] = None,
+                                         actor: Optional[dict] = None) -> dict:
+    """Consume ONE allocation (P0 9.4): exactly the batch/bin/qty a single pick
+    task is linked to — never the whole order's reservation set.
+
+    The parent reservation keeps its remaining allocations ACTIVE; it flips to
+    CONSUMED only when no allocations remain.
+    """
+    resv = await db.db.reservations.find_one({
+        "reference_type": reference_type, "reference_id": reference_id,
+        "product_id": product_id, "status": "ACTIVE"})
+    if not resv:
+        raise NotFound(f"No active reservation for {reference_type}:"
+                       f"{reference_id} {product_id}")
+    target = None
+    for alloc in resv.get("allocation", []):
+        same_batch = alloc["batch_id"] == batch_id or \
+            (alloc["batch_id"] == "UNBATCHED" and batch_id is None)
+        same_loc = (alloc.get("location_id") or None) == (location_id or None)
+        same_wh = warehouse_id is None or alloc["warehouse_id"] == warehouse_id
+        if same_batch and same_loc and same_wh:
+            target = alloc
+            break
+    if target is None:
+        raise ConflictError(
+            f"Allocation {product_id}/{batch_id}/{location_id} not on active "
+            f"reservation {reference_type}:{reference_id}")
+    qty = float(quantity if quantity is not None else target["allocate"])
+    if qty <= 0 or qty > float(target["allocate"]) + 1e-9:
+        raise ValidationFailed(
+            f"Pick quantity {qty} exceeds allocation {target['allocate']}")
+
+    mv = await record_movement(
+        movement_type=movement_type,
+        product_id=product_id,
+        warehouse_id=target["warehouse_id"],
+        quantity=qty,
+        uom=target.get("uom", "BOX"),
+        batch_id=target["batch_id"] if target["batch_id"] != "UNBATCHED" else None,
+        location_id=target.get("location_id"),
+        stock_status="RESERVED",
+        reference_type=reference_type,
+        reference_id=reference_id,
+        performed_by=actor,
+    )
+
+    # shrink or drop this allocation; consume the reservation only when empty
+    remaining_alloc = []
+    for alloc in resv.get("allocation", []):
+        if alloc is target:
+            left = round(float(alloc["allocate"]) - qty, 6)
+            if left > 1e-9:
+                alloc = {**alloc, "allocate": left}
+                remaining_alloc.append(alloc)
+        else:
+            remaining_alloc.append(alloc)
+    if remaining_alloc:
+        await db.db.reservations.update_one(
+            {"_id": resv["_id"]},
+            {"$set": {"allocation": remaining_alloc,
+                      "quantity": sum(float(a["allocate"]) for a in remaining_alloc),
+                      "updated_at": now_iso()}})
+    else:
+        await db.db.reservations.update_one(
+            {"_id": resv["_id"]}, {"$set": {"status": "CONSUMED",
+                                             "updated_at": now_iso()}})
+    return mv
 
 
 async def consume_reservation(reference_type: str, reference_id: str,

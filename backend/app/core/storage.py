@@ -55,6 +55,7 @@ class Storage:
             fid = await db.gridfs.upload_from_stream(filename, content)
             return f"gridfs://{fid}", "gridfs"
         path = os.path.join(settings.LOCAL_UPLOAD_DIR, filename)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "wb") as f:
             f.write(content)
         return f"local://{path}", "local"

@@ -111,6 +111,8 @@ READ_KINDS: Dict[str, Set[str]] = {
             "MANAGEMENT", "AUDITOR", "SUPPLIER"},
     "invoice": {"FINANCE", "MANAGEMENT", "AUDITOR", "PROCUREMENT", "SALES",
                 "SUPPLIER", "CUSTOMER"},
+    "inventory": {"WAREHOUSE", "QC", "QA", "FINANCE", "PROCUREMENT", "LOGISTICS",
+                  "MANAGEMENT", "SALES", "PLANT", "AUDITOR"},
     "payment": {"FINANCE", "MANAGEMENT", "AUDITOR", "SUPPLIER"},
     "gl": {"FINANCE", "MANAGEMENT", "AUDITOR"},
     "sales_order": {"SALES", "FINANCE", "WAREHOUSE", "LOGISTICS", "MANAGEMENT",
@@ -132,7 +134,9 @@ def can_read(roles: List[str], kind: str) -> bool:
         return True
     allowed = READ_KINDS.get(kind)
     if allowed is None:
-        return True  # unlisted kinds are open to authenticated staff
+        # DENY BY DEFAULT (P0 4.2): an unmapped resource kind must never be
+        # implicitly readable. Every new read surface needs an explicit policy.
+        return False
     return bool(allowed & set(roles))
 
 

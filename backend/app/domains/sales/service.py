@@ -278,9 +278,27 @@ async def attach_prescription(order_id: str, prescription_id: str, actor: dict) 
 
 
 async def rx_approved(order_id: str, actor: dict) -> dict:
+    """Pharmacist approved the linked prescription: PENDING_RX → RX_APPROVED
+    → CONFIRMED (both machine-legal direct transitions; P0 12.1 — the old code
+    called confirm_order() which only accepts DRAFT, dead-ending every
+    prescription-linked order)."""
+    so = await _get_order(order_id)
+    if so["status"] == "PENDING_RX":
+        await transition("sales_order", order_id, "sales_orders", "order_id",
+                         "RX_APPROVED", actor,
+                         reason="Pharmacist approved prescription")
+    if not so["credit_check"].get("ok", False):
+        raise ConflictError(
+            f"Credit check failed: {so['credit_check'].get('reason')}")
     await transition("sales_order", order_id, "sales_orders", "order_id",
-                     "RX_APPROVED", actor, reason="Pharmacist approved prescription")
-    return await confirm_order(order_id, actor)
+                     "CONFIRMED", actor, reason="Rx approved → order confirmed")
+    await bus.publish("sales.order_confirmed",
+                      {"order_id": order_id,
+                       "customer_id": so["customer_id"],
+                       "total": so["total_amount"]}, actor)
+    await record_node("sales_order", order_id, "confirmation",
+                      "Order Confirmed", "DONE", actor)
+    return await _get_order(order_id)
 
 
 async def allocate_order(order_id: str, actor: dict) -> dict:
@@ -394,10 +412,24 @@ async def pos_sale(payload: dict, actor: dict,
         customer_code = payload.get("customer_id") or "WALKIN"
         lines = []
         rx_ids = payload.get("prescription_ids", [])
+        approved_rxs = []
+        if rx_ids:
+            async for r in db.db.prescriptions.find({"rx_id": {"$in": rx_ids}}):
+                approved_rxs.append(r)
         for i, l in enumerate(payload["lines"], 1):
             prod = await db.db.products.find_one({"sku": l["sku"]})
             if not prod:
                 raise NotFound(f"Product {l['sku']} not found")
+            # Rx requirement comes from the PRODUCT MASTER, never from whether
+            # the caller happened to pass prescription_ids (P0 12.4)
+            if prod.get("is_prescription"):
+                linked = [r for r in approved_rxs
+                          if any(m.get("product_id") == l["sku"]
+                                 and m.get("matched") for m in r.get("matched", []))]
+                if not linked:
+                    raise ValidationFailed(
+                        f"{l['sku']} is prescription-only: an APPROVED, "
+                        "product-matched prescription is required")
             lines.append({"line_no": i, "sku": l["sku"],
                           "quantity": float(l["quantity"]),
                           "uom": prod.get("uom", "BOX"),
@@ -419,7 +451,7 @@ async def pos_sale(payload: dict, actor: dict,
             "payment": {"method": payload.get("payment_method", "CASH"),
                         "reference": payload.get("payment_reference"),
                         "paid": True},
-            "rx_required": bool(rx_ids),
+            "rx_required": bool(approved_rxs),
             "prescription_id": rx_ids[0] if rx_ids else None,
             "status": "CLOSED",
             "created_by": actor,

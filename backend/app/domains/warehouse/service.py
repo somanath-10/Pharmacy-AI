@@ -476,12 +476,13 @@ async def confirm_pick(task_id: str, actor: dict,
         b = await db.db.batches.find_one({"batch_id": task["batch_id"]})
         if b and b.get("blocked"):
             raise ConflictError(f"Batch {task['batch_id']} blocked: {b['block_reason']}")
-    # Consume the reservation (RESERVED → ledger SALE movement). Stock was
-    # already decremented from AVAILABLE at allocation time; posting another
-    # SALE against AVAILABLE would double-decrement.
-    await inventory.consume_reservation(
-        "SALES_ORDER", task["sales_order_id"], "SALE",
-        task["warehouse_id"], actor=actor)
+    # Consume ONLY this task's allocation (P0 9.4): the previous order-level
+    # consume let the first pick task drain reservations of every other
+    # product/line on the same order.
+    await inventory.consume_reservation_allocation(
+        task["product_id"], "SALES_ORDER", task["sales_order_id"], "SALE",
+        batch_id=task["batch_id"], warehouse_id=task["warehouse_id"],
+        quantity=float(task["quantity"]), actor=actor)
     await db.db.pick_tasks.update_one(
         {"task_id": task_id},
         {"$set": {"status": "PICKED", "picked_by": actor, "picked_at": now_iso()}})

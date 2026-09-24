@@ -19,5 +19,6 @@ dist/
 .DS_Store
 
 # App
-backend/uploads/
+backend/uploads/*
+!backend/uploads/.gitkeep
 *.log

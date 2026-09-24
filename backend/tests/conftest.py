@@ -21,6 +21,8 @@ def event_loop():
 
 @pytest.fixture(scope="session", autouse=True)
 async def setup_db():
+    from app.core.config import settings
+    os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
     await db.connect()
     await db.client.drop_database("pharmacy_ai_os_test")
     await db.connect()
