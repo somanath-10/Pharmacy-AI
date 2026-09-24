@@ -1,69 +1,95 @@
 import React, { useEffect, useState } from "react";
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
-import { api, getToken, getMe, onAuthChange, logout } from "./api";
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useNavigate } from "react-router-dom";
+import { api, getToken, getMe, setAuth, getRefresh, onAuthChange, logout } from "./api";
 import { ToastHost } from "./ui";
+
 import Login from "./pages/Login";
 import CommandCenter from "./pages/CommandCenter";
+import ExecutiveDashboard from "./pages/ExecutiveDashboard";
+import DecisionQueue from "./pages/DecisionQueue";
+import ExceptionCenter from "./pages/ExceptionCenter";
 import SalesWorkspace from "./pages/SalesWorkspace";
 import SupplyWorkspace from "./pages/SupplyWorkspace";
 import VendorsWorkspace from "./pages/VendorsWorkspace";
 import WarehouseWorkspace from "./pages/WarehouseWorkspace";
 import QualityWorkspace from "./pages/QualityWorkspace";
 import PlantWorkspace from "./pages/PlantWorkspace";
+import EngineeringWorkspace from "./pages/EngineeringWorkspace";
 import PharmacyWorkspace from "./pages/PharmacyWorkspace";
 import LogisticsWorkspace from "./pages/LogisticsWorkspace";
 import FinanceWorkspace from "./pages/FinanceWorkspace";
-import DecisionQueue from "./pages/DecisionQueue";
+import ComplianceWorkspace from "./pages/ComplianceWorkspace";
+import SafetyWorkspace from "./pages/SafetyWorkspace";
+import AuditWorkspace from "./pages/AuditWorkspace";
+import AiGovernanceWorkspace from "./pages/AiGovernanceWorkspace";
+import MasterDataWorkspace from "./pages/MasterDataWorkspace";
+import PortalsWorkspace from "./pages/PortalsWorkspace";
+import SopTraining from "./pages/SopTraining";
+import DocumentCenter from "./pages/DocumentCenter";
+import UserProfile from "./pages/UserProfile";
 import WorkflowViewer from "./pages/WorkflowViewer";
 import AgentActivity from "./pages/AgentActivity";
-import ExceptionCenter from "./pages/ExceptionCenter";
 import AdminPage from "./pages/AdminPage";
-import ExecutiveDashboard from "./pages/ExecutiveDashboard";
+import GlobalSearchModal from "./pages/GlobalSearchModal";
 
-// Role-aware navigation: users only see modules their roles permit.
-// Sections follow the blueprint main-menu order (Part 4). Backend
-// authorization remains authoritative — this only declutters the UI.
+// ── Role Default Landing Workspace Resolution ──
+export function getRoleHome(roles = []) {
+  if (!roles || !roles.length) return "/queue";
+  if (roles.includes("SUPER_ADMIN") || roles.includes("MANAGEMENT")) return "/";
+  if (roles.includes("PHARMACIST")) return "/pharmacy";
+  if (roles.includes("WAREHOUSE")) return "/warehouse";
+  if (roles.includes("PLANT")) return "/plant";
+  if (roles.includes("QC") || roles.includes("QA")) return "/quality";
+  if (roles.includes("PROCUREMENT") || roles.includes("BUYER") || roles.includes("VENDOR_MANAGER")) return "/vendors";
+  if (roles.includes("SALES")) return "/sales";
+  if (roles.includes("FINANCE")) return "/finance";
+  if (roles.includes("LOGISTICS")) return "/logistics";
+  if (roles.includes("COMPLIANCE")) return "/compliance";
+  if (roles.includes("AUDITOR")) return "/audit";
+  if (roles.includes("SUPPLIER") || roles.includes("CUSTOMER")) return "/portals";
+  return "/queue";
+}
+
+// ── Enterprise Role Navigation Matrix ──
 const NAV_ITEMS = [
-  { to: "/", label: "AI Command Center", ico: "🧠", end: true, roles: "any", section: "Overview" },
-  { to: "/executive", label: "Executive Dashboard", ico: "📊",
-    roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Overview" },
-  { to: "/queue", label: "Human Decision Queue", ico: "🙋", pill: "human",
-    roles: ["SUPER_ADMIN", "MANAGEMENT", "FINANCE", "QA", "VENDOR_MANAGER", "PHARMACIST", "COMPLIANCE", "PLANT", "WAREHOUSE"],
-    section: "Overview" },
-  { to: "/exceptions", label: "Exception Center", ico: "⚠️",
-    roles: ["SUPER_ADMIN", "MANAGEMENT", "FINANCE", "QA", "COMPLIANCE", "PLANNING", "LOGISTICS", "WAREHOUSE", "AUDITOR"],
-    section: "Overview" },
+  // ── Enterprise Operations ──
+  { to: "/", label: "AI Command Center", ico: "🧠", end: true, roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/executive", label: "Executive Control Tower", ico: "📊", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/supply", label: "Supply Chain Planning", ico: "📆", roles: ["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"], section: "Enterprise Operations" },
+  { to: "/sales", label: "Sales & CRM", ico: "📈", roles: ["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"], section: "Enterprise Operations" },
+  { to: "/vendors", label: "Procurement & Sourcing", ico: "🛒", roles: ["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/warehouse", label: "Warehouse & WMS", ico: "📦", roles: ["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"], section: "Enterprise Operations" },
+  { to: "/quality", label: "QC / LIMS · QA / QMS", ico: "🧪", roles: ["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"], section: "Enterprise Operations" },
+  { to: "/plant", label: "Plant & Production", ico: "🏭", roles: ["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"], section: "Enterprise Operations" },
+  { to: "/engineering", label: "Engineering & Maintenance", ico: "⚙️", roles: ["SUPER_ADMIN", "PLANT", "QC", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/pharmacy", label: "Pharmacy & POS Counter", ico: "💊", roles: ["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/logistics", label: "Logistics & Fleet", ico: "🚚", roles: ["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/finance", label: "Finance & Accounts", ico: "💰", roles: ["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE"], section: "Enterprise Operations" },
 
-  { to: "/sales", label: "Customers / CRM / Sales", ico: "📈",
-    roles: ["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"], section: "Commercial" },
-  { to: "/supply", label: "Supply Chain Planning", ico: "📆",
-    roles: ["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"], section: "Commercial" },
+  // ── Common Suite (Internal Roles) ──
+  { to: "/queue", label: "Human Decision Queue", ico: "🙋", pill: "human", roles: "any", section: "Common Suite" },
+  { to: "/exceptions", label: "Exception Center", ico: "⚠️", roles: "any", section: "Common Suite" },
+  { to: "/documents", label: "Document Center & OCR", ico: "📁", roles: "any", section: "Common Suite" },
+  { to: "/workflows", label: "Workflow Timeline", ico: "🔄", roles: "any", section: "Common Suite" },
+  { to: "/agents", label: "Agent Activity Feed", ico: "🤖", roles: "any", section: "Common Suite" },
+  { to: "/sop-training", label: "SOP & Training Matrix", ico: "📖", roles: "any", section: "Common Suite" },
+  { to: "/profile", label: "My Profile & Security", ico: "👤", roles: "any", section: "Common Suite" },
 
-  { to: "/vendors", label: "Vendors / Sourcing / Procurement", ico: "🛒",
-    roles: ["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT", "SUPPLIER"], section: "Supply" },
-
-  { to: "/logistics", label: "Logistics (In/Outbound)", ico: "🚚",
-    roles: ["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT", "SUPPLIER"], section: "Operations" },
-  { to: "/warehouse", label: "Warehouse / WMS / Inventory", ico: "📦",
-    roles: ["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"], section: "Operations" },
-  { to: "/quality", label: "QC / LIMS · QA / QMS", ico: "🧪",
-    roles: ["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"], section: "Operations" },
-
-  { to: "/plant", label: "Plant / Production", ico: "🏭",
-    roles: ["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"], section: "Production & Care" },
-  { to: "/pharmacy", label: "Pharmacy / POS", ico: "💊",
-    roles: ["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"], section: "Production & Care" },
-  { to: "/finance", label: "Finance · Returns · Recall · PV", ico: "💰",
-    roles: ["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE", "QA"], section: "Production & Care" },
-
-  { to: "/agents", label: "Agent Activity", ico: "🤖", roles: "any", section: "Governance" },
-  { to: "/workflows", label: "Workflow Viewer / Audit", ico: "🔍", roles: "any", section: "Governance" },
-  { to: "/admin", label: "Master Data & Administration", ico: "⚙️",
-    roles: ["SUPER_ADMIN", "MANAGEMENT", "COMPLIANCE"], section: "Governance" },
+  // ── Governance & Regulation ──
+  { to: "/compliance", label: "Compliance & Regulatory", ico: "📜", roles: ["SUPER_ADMIN", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/pv", label: "Pharmacovigilance (PV)", ico: "🩺", roles: ["SUPER_ADMIN", "QA", "COMPLIANCE", "PHARMACIST", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/audit", label: "Auditor & Traceability", ico: "🔍", roles: ["SUPER_ADMIN", "AUDITOR", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/ai-governance", label: "AI Governance & Models", ico: "🛡️", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/masters", label: "Master Data Steward", ico: "🗄️", roles: ["SUPER_ADMIN", "MANAGEMENT", "PLANNING", "QA"], section: "Governance & External" },
+  { to: "/portals", label: "External Portals View", ico: "🌐", roles: ["SUPER_ADMIN", "MANAGEMENT", "SUPPLIER", "CUSTOMER"], section: "Governance & External" },
+  { to: "/admin", label: "System Administration", ico: "🛠️", roles: ["SUPER_ADMIN"], section: "Governance & External" },
 ];
 
 function visibleNav(me) {
   const roles = me?.roles || [];
+  if (!roles.length || roles.includes("SUPER_ADMIN") || roles.includes("MANAGEMENT")) {
+    return NAV_ITEMS;
+  }
   const isExternal = roles.includes("SUPPLIER") || roles.includes("CUSTOMER");
   return NAV_ITEMS.filter((n) => {
     if (n.roles === "any") return !isExternal;
@@ -76,13 +102,81 @@ function navWithSections(me) {
   const out = [];
   let last = null;
   for (const n of visibleNav(me)) {
-    if (n.section !== last) { out.push({ section: n.section }); last = n.section; }
+    if (n.section !== last) {
+      out.push({ isDivider: true, section: n.section });
+      last = n.section;
+    }
     out.push(n);
   }
   return out;
 }
 
-function Shell({ children }) {
+// ── Role Access Gatekeeper Component ──
+function AccessDenied({ requiredRoles, userRoles }) {
+  const navigate = useNavigate();
+  const homePath = getRoleHome(userRoles);
+
+  return (
+    <div style={{ padding: 40, maxWidth: 640, margin: "60px auto", textAlign: "center" }}>
+      <div style={{ fontSize: 56, marginBottom: 16 }}>⛔</div>
+      <h2 style={{ marginBottom: 8 }}>Access Restricted (403 Forbidden)</h2>
+      <p style={{ color: "var(--muted)", lineHeight: 1.6, marginBottom: 24 }}>
+        Your user identity has role(s):{" "}
+        <b>{userRoles?.length ? userRoles.join(", ") : "GUEST"}</b>.
+        <br />
+        This workspace requires:{" "}
+        <span className="mono" style={{ color: "var(--purple)", fontWeight: 600 }}>
+          {Array.isArray(requiredRoles) ? requiredRoles.join(" · ") : requiredRoles}
+        </span>
+      </p>
+      <div className="row" style={{ justifyContent: "center", gap: 12 }}>
+        <button className="btn primary" onClick={() => navigate(homePath)}>
+          Return to My Workspace
+        </button>
+        <button className="btn ghost" onClick={() => navigate("/profile")}>
+          View Profile & Permissions
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Protected Route Guard ──
+function ProtectedRoute({ element, allowedRoles }) {
+  const me = getMe();
+  const roles = me?.roles || [];
+
+  // Super Admin and Management can access all internal workspaces
+  if (roles.includes("SUPER_ADMIN") || roles.includes("MANAGEMENT")) {
+    return element;
+  }
+
+  // Common internal suite
+  if (allowedRoles === "any") {
+    const isExternal = roles.includes("SUPPLIER") || roles.includes("CUSTOMER");
+    if (!isExternal) return element;
+  }
+
+  const isAllowed = Array.isArray(allowedRoles) && allowedRoles.some((r) => roles.includes(r));
+  if (!isAllowed) {
+    return <AccessDenied requiredRoles={allowedRoles} userRoles={roles} />;
+  }
+
+  return element;
+}
+
+// ── Home Route Router ──
+function HomeRedirect() {
+  const me = getMe();
+  const roles = me?.roles || [];
+  if (roles.includes("SUPER_ADMIN") || roles.includes("MANAGEMENT")) {
+    return <CommandCenter />;
+  }
+  const home = getRoleHome(roles);
+  return <Navigate to={home} replace />;
+}
+
+function Shell({ children, onOpenSearch }) {
   const me = getMe();
   const [pending, setPending] = useState(0);
 
@@ -111,23 +205,24 @@ function Shell({ children }) {
             <small>Autonomous Enterprise Core</small>
           </div>
         </div>
-        {navWithSections(me).map((n, i) =>
-          n.section ? (
-            <div className="nav-section" key={`s${i}`}>{n.section.toUpperCase()}</div>
-          ) : (
-            <NavLink key={n.to} to={n.to} end={n.end}
-                     className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-              <span className="ico">{n.ico}</span>
-              {n.label}
-              {n.pill === "human" && pending > 0 && <span className="pill">{pending}</span>}
-            </NavLink>
-          )
-        )}
+        <div className="sidebar-nav">
+          {navWithSections(me).map((n, i) =>
+            n.isDivider ? (
+              <div className="nav-section" key={`s${i}`}>{n.section.toUpperCase()}</div>
+            ) : (
+              <NavLink key={n.to} to={n.to} end={n.end}
+                       className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
+                <span className="ico">{n.ico}</span>
+                <span className="nav-label">{n.label}</span>
+                {n.pill === "human" && pending > 0 && <span className="pill">{pending}</span>}
+              </NavLink>
+            )
+          )}
+        </div>
         <div className="sidebar-foot">
           <button className="btn ghost sm" style={{ width: "100%", marginBottom: 8 }} onClick={logout}>
             ⎋ Sign out
           </button>
-          <div>v2 · {visibleNav(me).length} modules visible to your roles</div>
         </div>
       </aside>
       <main className="main">{children}</main>
@@ -137,19 +232,69 @@ function Shell({ children }) {
 
 export function Topbar({ title, sub }) {
   const me = getMe();
+  const navigate = useNavigate();
+  const displayName = me?.name || me?.email?.split("@")[0] || "User";
+  const rolesList = (me?.roles || []).join(" · ") || "Operator";
+  const initials = (me?.name ? me.name.split(" ").map(w => w[0]).join("") : me?.email || "U").slice(0, 2).toUpperCase();
+
+  const isElevated = (me?.roles || []).includes("SUPER_ADMIN") || (me?.roles || []).includes("MANAGEMENT");
+
   return (
     <div className="topbar">
-      <div>
+      <div className="topbar-header">
         <h1>{title}</h1>
         {sub && <div className="sub">{sub}</div>}
       </div>
       <div className="spacer" />
+
+      {/* Instant Global Search Trigger */}
+      <button
+        className="topbar-search-btn"
+        onClick={() => window.dispatchEvent(new CustomEvent("open-global-search"))}
+        title="Search records across all modules (Cmd+K)"
+      >
+        <span>🔍 Search anything...</span>
+        <kbd>⌘K</kbd>
+      </button>
+
+      {/* Role Perspective Switcher for Admins */}
+      {isElevated && (
+        <select
+          className="role-switcher-select"
+          onChange={(e) => { if (e.target.value) navigate(e.target.value); }}
+          defaultValue=""
+          title="Jump to Role Workspace"
+        >
+          <option value="" disabled>Switch Workspace...</option>
+          <option value="/">🧠 AI Command Center</option>
+          <option value="/executive">📊 Executive Control Tower</option>
+          <option value="/supply">📆 Supply Chain Planning</option>
+          <option value="/sales">📈 Sales & CRM</option>
+          <option value="/vendors">🛒 Procurement & Sourcing</option>
+          <option value="/warehouse">📦 Warehouse & WMS</option>
+          <option value="/quality">🧪 QC & QA Quality</option>
+          <option value="/plant">🏭 Plant & Production</option>
+          <option value="/engineering">⚙️ Engineering & Maint</option>
+          <option value="/pharmacy">💊 Pharmacy & POS</option>
+          <option value="/logistics">🚚 Logistics & Fleet</option>
+          <option value="/finance">💰 Finance & Accounts</option>
+          <option value="/compliance">📜 Compliance & Reg</option>
+          <option value="/pv">🩺 Pharmacovigilance</option>
+          <option value="/audit">🔍 Auditor & Traceability</option>
+          <option value="/ai-governance">🛡️ AI Governance</option>
+          <option value="/masters">🗄️ Master Data Steward</option>
+          <option value="/portals">🌐 External Portals</option>
+          <option value="/admin">🛠️ System Administration</option>
+        </select>
+      )}
+
       <span className="live-chip"><span className="dot green pulse" /> Live — agents orchestrating</span>
-      <div className="user-chip">
-        <div className="avatar">{(me?.email || "U").slice(0, 2).toUpperCase()}</div>
-        <div>
-          <b>{me?.email?.split("@")[0] || "user"}</b>
-          <small>{(me?.roles || []).join(", ") || "user"}</small>
+
+      <div className="user-chip clickable" onClick={() => navigate("/profile")} title="View Profile">
+        <div className="avatar">{initials}</div>
+        <div className="user-chip-info">
+          <b>{displayName}</b>
+          <small>{rolesList}</small>
         </div>
       </div>
     </div>
@@ -158,34 +303,89 @@ export function Topbar({ title, sub }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
+  const [searchOpen, setSearchOpen] = useState(false);
+
   useEffect(() => onAuthChange(() => setAuthed(!!getToken())), []);
+
+  useEffect(() => {
+    if (getToken()) {
+      api("/api/auth/me")
+        .then((user) => {
+          if (user) {
+            setAuth(getToken(), user, getRefresh());
+          }
+        })
+        .catch(() => { /* silent */ });
+    }
+  }, [authed]);
+
+  // Global Cmd+K / Ctrl+K keyboard shortcut listener
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    const handleCustom = () => setSearchOpen(true);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("open-global-search", handleCustom);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("open-global-search", handleCustom);
+    };
+  }, []);
 
   return (
     <ToastHost>
       <BrowserRouter>
+        <GlobalSearchModal open={searchOpen} onClose={() => setSearchOpen(false)} />
         {!authed ? (
           <Routes>
             <Route path="*" element={<Login />} />
           </Routes>
         ) : (
-          <Shell>
+          <Shell onOpenSearch={() => setSearchOpen(true)}>
             <Routes>
-              <Route path="/" element={<CommandCenter />} />
-              <Route path="/queue" element={<DecisionQueue />} />
-              <Route path="/sales" element={<SalesWorkspace />} />
-              <Route path="/supply" element={<SupplyWorkspace />} />
-              <Route path="/vendors" element={<VendorsWorkspace />} />
-              <Route path="/warehouse" element={<WarehouseWorkspace />} />
-              <Route path="/quality" element={<QualityWorkspace />} />
-              <Route path="/plant" element={<PlantWorkspace />} />
-              <Route path="/pharmacy" element={<PharmacyWorkspace />} />
-              <Route path="/logistics" element={<LogisticsWorkspace />} />
-              <Route path="/finance" element={<FinanceWorkspace />} />
-              <Route path="/workflows" element={<WorkflowViewer />} />
-              <Route path="/agents" element={<AgentActivity />} />
-              <Route path="/executive" element={<ExecutiveDashboard />} />
-              <Route path="/exceptions" element={<ExceptionCenter />} />
-              <Route path="/admin" element={<AdminPage />} />
+              {/* Home & Overview */}
+              <Route path="/" element={<HomeRedirect />} />
+              <Route path="/executive" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT"]} element={<ExecutiveDashboard />} />} />
+
+              {/* Core Workspaces */}
+              <Route path="/supply" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"]} element={<SupplyWorkspace />} />} />
+              <Route path="/sales" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"]} element={<SalesWorkspace />} />} />
+              <Route path="/vendors" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT"]} element={<VendorsWorkspace />} />} />
+              <Route path="/procurement" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT"]} element={<VendorsWorkspace />} />} />
+              <Route path="/warehouse" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"]} element={<WarehouseWorkspace />} />} />
+              <Route path="/quality" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"]} element={<QualityWorkspace />} />} />
+              <Route path="/plant" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"]} element={<PlantWorkspace />} />} />
+              <Route path="/engineering" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PLANT", "QC", "MANAGEMENT"]} element={<EngineeringWorkspace />} />} />
+              <Route path="/pharmacy" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"]} element={<PharmacyWorkspace />} />} />
+              <Route path="/pos" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"]} element={<PharmacyWorkspace />} />} />
+              <Route path="/logistics" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT"]} element={<LogisticsWorkspace />} />} />
+              <Route path="/finance" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE"]} element={<FinanceWorkspace />} />} />
+
+              {/* Common Suite */}
+              <Route path="/queue" element={<ProtectedRoute allowedRoles="any" element={<DecisionQueue />} />} />
+              <Route path="/exceptions" element={<ProtectedRoute allowedRoles="any" element={<ExceptionCenter />} />} />
+              <Route path="/documents" element={<ProtectedRoute allowedRoles="any" element={<DocumentCenter />} />} />
+              <Route path="/workflows" element={<ProtectedRoute allowedRoles="any" element={<WorkflowViewer />} />} />
+              <Route path="/agents" element={<ProtectedRoute allowedRoles="any" element={<AgentActivity />} />} />
+              <Route path="/sop-training" element={<ProtectedRoute allowedRoles="any" element={<SopTraining />} />} />
+              <Route path="/profile" element={<ProtectedRoute allowedRoles="any" element={<UserProfile />} />} />
+
+              {/* Regulatory & Governance */}
+              <Route path="/compliance" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "COMPLIANCE", "QA", "MANAGEMENT"]} element={<ComplianceWorkspace />} />} />
+              <Route path="/pv" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "QA", "COMPLIANCE", "PHARMACIST", "MANAGEMENT"]} element={<SafetyWorkspace />} />} />
+              <Route path="/audit" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "AUDITOR", "COMPLIANCE", "QA", "MANAGEMENT"]} element={<AuditWorkspace />} />} />
+              <Route path="/ai-governance" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT"]} element={<AiGovernanceWorkspace />} />} />
+              <Route path="/masters" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT", "PLANNING", "QA"]} element={<MasterDataWorkspace />} />} />
+              <Route path="/portals" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT", "SUPPLIER", "CUSTOMER"]} element={<PortalsWorkspace />} />} />
+              <Route path="/portal/supplier" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT", "SUPPLIER"]} element={<PortalsWorkspace />} />} />
+              <Route path="/portal/customer" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN", "MANAGEMENT", "CUSTOMER"]} element={<PortalsWorkspace />} />} />
+              <Route path="/admin" element={<ProtectedRoute allowedRoles={["SUPER_ADMIN"]} element={<AdminPage />} />} />
+
+              {/* Fallback */}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Shell>

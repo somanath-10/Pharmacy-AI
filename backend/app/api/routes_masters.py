@@ -146,3 +146,61 @@ async def use_equipment(code: str, payload: dict = Body(...),
                                            principal)
 
 
+@router.get("/equipment/{code}/work-orders")
+async def get_equipment_work_orders(code: str, principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+    orders = []
+    async for o in db.db.equipment_work_orders.find({"equipment_code": code}).sort("created_at", -1):
+        o.pop("_id", None)
+        orders.append(o)
+    return orders
+
+
+@router.post("/equipment/{code}/work-orders")
+async def create_equipment_work_order(code: str, payload: dict = Body(...), principal: dict = Depends(get_current_principal)):
+    from app.core.database import db, now_iso, utcnow
+    from app.core.audit import audit
+    doc = {
+        "order_id": f"WO-{int(utcnow().timestamp())}",
+        "equipment_code": code,
+        "type": payload.get("type", "PREVENTIVE"),
+        "title": payload.get("title", f"Maintenance on {code}"),
+        "priority": payload.get("priority", "MEDIUM"),
+        "status": "SCHEDULED",
+        "description": payload.get("description", ""),
+        "assigned_to": payload.get("assigned_to", "Engineering Team"),
+        "due_date": payload.get("due_date"),
+        "created_by": principal.get("id") or "user",
+        "created_at": now_iso(),
+    }
+    await db.db.equipment_work_orders.insert_one(doc)
+    await audit("EQUIPMENT", code, "WORK_ORDER_CREATED", principal, details={"order_id": doc["order_id"]})
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/equipment/{code}/check-readiness")
+async def check_equipment_readiness(code: str, principal: dict = Depends(get_current_principal)):
+    from app.domains.masters.service import get_equipment, equipment_ready
+    eq = await get_equipment(code)
+    if not eq:
+        return {"code": code, "found": False, "ready": False, "blockers": ["Equipment not found"]}
+    ready, blockers = equipment_ready(eq)
+    eq_clean = dict(eq)
+    eq_clean.pop("_id", None)
+    return {"code": code, "found": True, "ready": ready, "blockers": blockers, "equipment": eq_clean}
+
+
+@router.get("/equipment/{code}/logbook")
+async def get_equipment_logbook(code: str, principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+    eq = await db.db.equipment.find_one({"code": code})
+    logbook = (eq or {}).get("logbook", [])
+    audit_events = []
+    async for a in db.db.audit_events.find({"entity_type": "EQUIPMENT", "entity_id": code}).sort("timestamp", -1).limit(20):
+        a.pop("_id", None)
+        audit_events.append(a)
+    return {"code": code, "logbook": logbook, "audit_events": audit_events}
+
+
+

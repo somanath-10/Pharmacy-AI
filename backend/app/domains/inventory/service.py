@@ -439,7 +439,10 @@ async def change_stock_status(product_id: str, warehouse_id: str, batch_id: Opti
 async def _post_status_leg(product_id, warehouse_id, batch_id, status, qty,
                            direction, uom, location_id, reference_type,
                            reference_id, actor, note=None):
-    """One ledger-first status leg: append movement row, then $inc balance."""
+    """One canonical status leg: ledger movement + balance update, joined to
+    the caller's transaction when one is open, else individually atomic under
+    the per-key lock. Outflow legs (direction < 0) carry the non-negative
+    balance guard so a leg can never drive its row negative."""
     wh = await db.db.warehouses.find_one({"code": warehouse_id})
     org = (wh or {}).get("organization_id") or DEFAULT_ORG
     site = (wh or {}).get("site_id") or DEFAULT_SITE
@@ -460,15 +463,38 @@ async def _post_status_leg(product_id, warehouse_id, batch_id, status, qty,
     upd = _balance_update(direction * qty, qty, uom, location_id, None)
     session = current_session()
     if session is not None:
+        if direction < 0:
+            r = await db.db.inventory_balances.find_one_and_update(
+                {**bal_key, "quantity": {"$gte": qty}}, upd,
+                upsert=False, session=session)
+            if r is None:
+                try:
+                    await session.abort_transaction()
+                except Exception:  # noqa: BLE001 — abort is best-effort
+                    pass
+                raise ConflictError(
+                    f"Status leg would over-decrement {product_id} "
+                    f"({status}) in {warehouse_id}")
+        else:
+            await db.db.inventory_balances.update_one(bal_key, upd,
+                                                      upsert=True, session=session)
         await db.db.inventory_movements.insert_one(doc, session=session)
-        await db.db.inventory_balances.update_one(bal_key, upd, upsert=True,
-                                                  session=session)
     else:
         async with await _locks.lock(_lock_key(org, site, warehouse_id,
                                                product_id, batch_id, status,
                                                uom)):
+            if direction < 0:
+                r = await db.db.inventory_balances.find_one_and_update(
+                    {**bal_key, "quantity": {"$gte": qty}}, upd, upsert=False)
+                if r is None:
+                    raise ConflictError(
+                        f"Status leg would over-decrement {product_id} "
+                        f"({status}) in {warehouse_id}")
+            else:
+                await db.db.inventory_balances.update_one(bal_key, upd,
+                                                          upsert=True)
             await db.db.inventory_movements.insert_one(doc)
-            await db.db.inventory_balances.update_one(bal_key, upd, upsert=True)
+
 
 
 async def balances(product_id: Optional[str] = None, warehouse_id: Optional[str] = None,
@@ -707,12 +733,14 @@ async def reserve(product_id: str, quantity: float, reference_type: str,
         "warehouse_id": warehouse_id,
         "allocation": plan,
         "status": "ACTIVE",
+        "version": 1,
         "created_by": actor,
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
     from pymongo.errors import DuplicateKeyError
 
+    superseded_id = None
     try:
         res = await db.db.reservations.insert_one(res_doc)
     except DuplicateKeyError:
@@ -722,7 +750,32 @@ async def reserve(product_id: str, quantity: float, reference_type: str,
             "product_id": product_id, "status": {"$in": ["ACTIVE", "FROZEN"]}})
         if got:
             return _reservation_out(dict(got))
-        raise
+        # a TERMINAL reservation (released/consumed) still holds the unique
+        # (reference, product) key — supersede it in place so legitimate
+        # re-reservation (retry, backorder fulfillment) is not wedged forever
+        for _ in range(3):
+            res_doc.pop("_id", None)  # the failed insert stamped one; replacement keeps the original _id
+            stale = await db.db.reservations.find_one_and_replace(
+                {"reference_type": reference_type,
+                 "reference_id": reference_id,
+                 "product_id": product_id,
+                 "status": {"$in": ["RELEASED", "CONSUMED"]}},
+                res_doc,
+                return_document=ReturnDocument.AFTER)
+            if stale is not None:
+                superseded_id = stale["_id"]
+                break
+            # lost the supersede race — the row is now ACTIVE (someone else
+            # re-reserved this exact reference): idempotent semantics apply
+            got = await db.db.reservations.find_one({
+                "reference_type": reference_type, "reference_id": reference_id,
+                "product_id": product_id,
+                "status": {"$in": ["ACTIVE", "FROZEN"]}})
+            if got:
+                return _reservation_out(dict(got))
+        if superseded_id is None:
+            raise  # RELEASING or unknown state: transient, caller retries
+        res = None
 
     # atomic conditional decrement of the AVAILABLE projection + matching
     # increment of the RESERVED row (two-leg status move, race-free).
@@ -765,7 +818,8 @@ async def reserve(product_id: str, quantity: float, reference_type: str,
                            actor=actor)
 
     res_doc.pop("_id", None)
-    res_doc["reservation_id"] = str(res.inserted_id)
+    res_doc["reservation_id"] = str(res.inserted_id if res is not None
+                                    else superseded_id)
     await bus.publish("inventory.reserved", {
         "product_id": product_id, "quantity": qty, "reference": reference_id,
     })
@@ -850,66 +904,73 @@ async def release_reservation_partial(reference_type: str, reference_id: str,
     rel = float(quantity)
     if rel <= 0:
         raise ValidationFailed("release quantity must be positive")
+    # Claim the reservation quantity FIRST (conditional on ACTIVE + enough
+    # held). Two concurrent partial releases can then never both post the
+    # same RESERVED→AVAILABLE legs, and the claimed amount is fixed for the
+    # ledger walk below.
     r = await db.db.reservations.find_one_and_update(
         {"reference_type": reference_type, "reference_id": reference_id,
          "product_id": product_id, "status": "ACTIVE",
          "quantity": {"$gte": rel}},
-        {"$inc": {"quantity": -rel},
+        {"$inc": {"quantity": -rel, "version": 1},
          "$set": {"updated_at": now_iso()}},
         return_document=ReturnDocument.AFTER)
     if r is None:
         raise ConflictError(
             f"Reservation {reference_type}:{reference_id} for {product_id} "
             f"cannot release {rel}")
-    # walk allocation rows, releasing from the tail (FEFO-last) first
-    remaining = rel
-    alloc = r.get("allocation") or []
-    for a in reversed(alloc):
-        if remaining <= 1e-9:
+    # Distribute `rel` over a FRESH allocation snapshot with an optimistic
+    # version CAS: a concurrent release/pick may rewrite allocation rows
+    # between our claim and our rewrite — the guard makes the loser re-read
+    # instead of clobbering (which used to desync doc vs allocation sum).
+    legs = None
+    for _ in range(5):
+        fresh = await db.db.reservations.find_one({"_id": r["_id"]})
+        alloc = [dict(a) for a in (fresh.get("allocation") or [])]
+        if sum(float(a["allocate"]) for a in alloc) + 1e-9 < rel:
+            raise ConflictError(
+                f"Reservation rows hold less than the claimed {rel} "
+                f"(concurrent mutation) — refusing inconsistent release")
+        remaining = rel
+        plan = []
+        for a in reversed(alloc):  # FEFO-last rows release first
+            if remaining <= 1e-9:
+                break
+            take = min(float(a["allocate"]), remaining)
+            if take <= 0:
+                continue
+            a["allocate"] = float(a["allocate"]) - take
+            remaining -= take
+            plan.append((a, take))
+        new_alloc = [a for a in alloc if float(a["allocate"]) > 1e-9]
+        setd: Dict[str, Any] = {"allocation": new_alloc,
+                                "updated_at": now_iso()}
+        if not new_alloc:
+            setd["status"] = "RELEASED"
+        cas = await db.db.reservations.update_one(
+            {"_id": r["_id"], "version": fresh.get("version", 0)},
+            {"$set": setd, "$inc": {"version": 1}})
+        if cas.modified_count:
+            legs = [(a, take) for a, take in plan]
             break
-        take = min(float(a["allocate"]), remaining)
-        if take <= 0:
-            continue
-        a["allocate"] = float(a["allocate"]) - take
-        remaining -= take
+    if legs is None:
+        raise ConflictError(
+            "Reservation allocation concurrently modified too many times; "
+            "retry the release")
+    for a, take in legs:
         batch_key = None if a["batch_id"] == "UNBATCHED" else a["batch_id"]
         uom = a.get("uom", "BOX")
         loc_key = a.get("location_id")
-        org, site = await _org_site(a["warehouse_id"])
-        async with await _locks.lock(_lock_key(
-                org, site, a["warehouse_id"], product_id, batch_key,
-                "RESERVED", uom)):
-            for status, direction in (("RESERVED", -1), ("AVAILABLE", +1)):
-                doc = {
-                    "movement_id": await next_movement_id(),
-                    "organization_id": org, "site_id": site,
-                    "product_id": product_id, "batch_id": batch_key,
-                    "warehouse_id": a["warehouse_id"], "location_id": loc_key,
-                    "movement_type": "STATUS_CHANGE",
-                    "quantity": take,
-                    "signed_quantity": direction * take,
-                    "uom": uom, "stock_status": status,
-                    "reference_type": reference_type,
-                    "reference_id": reference_id,
-                    "performed_by": actor or {"type": "SYSTEM", "id": "platform"},
-                    "unit_cost": None,
-                    "note": f"partial release {reason}"[:200],
-                    "created_at": now_iso(),
-                }
-                await db.db.inventory_movements.insert_one(doc)
-                await db.db.inventory_balances.update_one(
-                    _balance_key(org, site, a["warehouse_id"], product_id,
-                                 batch_key, status, uom, loc_key),
-                    {"$inc": {"quantity": direction * take, "version": 1},
-                     "$set": {"updated_at": now_iso()}}, upsert=True)
-    alloc = [a for a in alloc if float(a["allocate"]) > 1e-9]
-    if float(r.get("quantity") or 0) <= 1e-9 or not alloc:
-        await db.db.reservations.update_one(
-            {"_id": r["_id"]},
-            {"$set": {"status": "RELEASED", "updated_at": now_iso()}})
-    else:
-        await db.db.reservations.update_one(
-            {"_id": r["_id"]}, {"$set": {"allocation": alloc}})
+        # canonical legs: RESERVED −take (guard prevents over-decrement),
+        # then AVAILABLE +take
+        await _post_status_leg(product_id, a["warehouse_id"], batch_key,
+                               "RESERVED", take, -1, uom, loc_key,
+                               reference_type, reference_id, actor,
+                               note=f"partial release {reason}"[:200])
+        await _post_status_leg(product_id, a["warehouse_id"], batch_key,
+                               "AVAILABLE", take, +1, uom, loc_key,
+                               reference_type, reference_id, actor,
+                               note=f"partial release {reason}"[:200])
     return rel
 
 
@@ -923,46 +984,33 @@ async def release_reservation(reference_type: str, reference_id: str,
     rows = [dict(r) async for r in db.db.reservations.find(q)]
     released = 0
     for r in rows:
-        org, site = await _org_site(r["allocation"][0]["warehouse_id"]
-                                    if r.get("allocation") else "WH-MAIN")
+        # Claim the reservation BEFORE posting legs: a concurrent release of
+        # the same reservation sees status != ACTIVE and skips. All of the
+        # reservation's allocations are released under this single claim.
+        res = await db.db.reservations.find_one_and_update(
+            {"_id": r["_id"], "status": "ACTIVE"},
+            {"$set": {"status": "RELEASING", "updated_at": now_iso()}})
+        if res is None:
+            continue  # someone else already claimed/released it
         for alloc in r.get("allocation", []):
             batch_key = (None if alloc["batch_id"] == "UNBATCHED"
                          else alloc["batch_id"])
             uom = alloc.get("uom", "BOX")
             loc_key = alloc.get("location_id")
-            async with await _locks.lock(_lock_key(
-                    org, site, alloc["warehouse_id"],
-                    r["product_id"], batch_key, "RESERVED", uom)):
-                # ledger legs: RESERVED −qty, AVAILABLE +qty (bin preserved)
-                for status, direction in (("RESERVED", -1), ("AVAILABLE", +1)):
-                    doc = {
-                        "movement_id": await next_movement_id(),
-                        "organization_id": org, "site_id": site,
-                        "product_id": r["product_id"], "batch_id": batch_key,
-                        "warehouse_id": alloc["warehouse_id"],
-                        "location_id": loc_key,
-                        "movement_type": "STATUS_CHANGE",
-                        "quantity": float(alloc["allocate"]),
-                        "signed_quantity": direction * float(alloc["allocate"]),
-                        "uom": uom, "stock_status": status,
-                        "reference_type": reference_type,
-                        "reference_id": reference_id,
-                        "performed_by": actor or {"type": "SYSTEM", "id": "platform"},
-                        "unit_cost": None,
-                        "note": f"reservation release {reference_id}",
-                        "created_at": now_iso(),
-                    }
-                    await db.db.inventory_movements.insert_one(doc)
-                    await db.db.inventory_balances.update_one(
-                        _balance_key(org, site,
-                                     alloc["warehouse_id"], r["product_id"],
-                                     batch_key, status, uom, loc_key),
-                        {"$inc": {"quantity": direction * float(alloc["allocate"]),
-                                  "version": 1},
-                         "$set": {"updated_at": now_iso()}},
-                        upsert=True)
+            # canonical legs: RESERVED −allocate (guard prevents negative),
+            # AVAILABLE +allocate (bin preserved end to end)
+            await _post_status_leg(r["product_id"], alloc["warehouse_id"],
+                                   batch_key, "RESERVED",
+                                   float(alloc["allocate"]), -1, uom, loc_key,
+                                   reference_type, reference_id, actor,
+                                   note=f"reservation release {reference_id}")
+            await _post_status_leg(r["product_id"], alloc["warehouse_id"],
+                                   batch_key, "AVAILABLE",
+                                   float(alloc["allocate"]), +1, uom, loc_key,
+                                   reference_type, reference_id, actor,
+                                   note=f"reservation release {reference_id}")
         res = await db.db.reservations.update_one(
-            {"_id": r["_id"], "status": "ACTIVE"},
+            {"_id": r["_id"], "status": "RELEASING"},
             {"$set": {"status": "RELEASED", "updated_at": now_iso()}})
         released += res.modified_count
     return released
@@ -982,65 +1030,75 @@ async def consume_reservation_allocation(product_id: str, reference_type: str,
     The parent reservation keeps its remaining allocations ACTIVE; it flips to
     CONSUMED only when no allocations remain.
     """
-    resv = await db.db.reservations.find_one({
-        "reference_type": reference_type, "reference_id": reference_id,
-        "product_id": product_id, "status": "ACTIVE"})
-    if not resv:
-        raise NotFound(f"No active reservation for {reference_type}:"
-                       f"{reference_id} {product_id}")
-    target = None
-    for alloc in resv.get("allocation", []):
-        same_batch = alloc["batch_id"] == batch_id or \
-            (alloc["batch_id"] == "UNBATCHED" and batch_id is None)
-        same_loc = (alloc.get("location_id") or None) == (location_id or None)
-        same_wh = warehouse_id is None or alloc["warehouse_id"] == warehouse_id
-        if same_batch and same_loc and same_wh:
-            target = alloc
-            break
-    if target is None:
-        raise ConflictError(
-            f"Allocation {product_id}/{batch_id}/{location_id} not on active "
-            f"reservation {reference_type}:{reference_id}")
-    qty = float(quantity if quantity is not None else target["allocate"])
-    if qty <= 0 or qty > float(target["allocate"]) + 1e-9:
-        raise ValidationFailed(
-            f"Pick quantity {qty} exceeds allocation {target['allocate']}")
-
-    mv = await record_movement(
-        movement_type=movement_type,
-        product_id=product_id,
-        warehouse_id=target["warehouse_id"],
-        quantity=qty,
-        uom=target.get("uom", "BOX"),
-        batch_id=target["batch_id"] if target["batch_id"] != "UNBATCHED" else None,
-        location_id=target.get("location_id"),
-        stock_status="RESERVED",
-        reference_type=reference_type,
-        reference_id=reference_id,
-        performed_by=actor,
-    )
-
-    # shrink or drop this allocation; consume the reservation only when empty
-    remaining_alloc = []
-    for alloc in resv.get("allocation", []):
-        if alloc is target:
-            left = round(float(alloc["allocate"]) - qty, 6)
-            if left > 1e-9:
-                alloc = {**alloc, "allocate": left}
-                remaining_alloc.append(alloc)
-        else:
-            remaining_alloc.append(alloc)
-    if remaining_alloc:
-        await db.db.reservations.update_one(
-            {"_id": resv["_id"]},
-            {"$set": {"allocation": remaining_alloc,
-                      "quantity": sum(float(a["allocate"]) for a in remaining_alloc),
-                      "updated_at": now_iso()}})
-    else:
-        await db.db.reservations.update_one(
-            {"_id": resv["_id"]}, {"$set": {"status": "CONSUMED",
-                                             "updated_at": now_iso()}})
-    return mv
+    mv = None
+    # CAS loop: pick the target allocation from a fresh snapshot and shrink it
+    # with an optimistic version check. A concurrent consume/release of the
+    # same reservation rewrites allocation rows; the version guard makes the
+    # loser re-read instead of clobbering (previously a stale rewrite could
+    # desync doc.quantity from the allocation sum).
+    for _ in range(5):
+        resv = await db.db.reservations.find_one({
+            "reference_type": reference_type, "reference_id": reference_id,
+            "product_id": product_id, "status": "ACTIVE"})
+        if not resv:
+            if mv is not None:
+                return mv  # concurrent closer finished the reservation
+            raise NotFound(f"No active reservation for {reference_type}:"
+                           f"{reference_id} {product_id}")
+        target = None
+        for alloc in resv.get("allocation", []):
+            same_batch = alloc["batch_id"] == batch_id or \
+                (alloc["batch_id"] == "UNBATCHED" and batch_id is None)
+            same_loc = (alloc.get("location_id") or None) == (location_id or None)
+            same_wh = warehouse_id is None or alloc["warehouse_id"] == warehouse_id
+            if same_batch and same_loc and same_wh:
+                target = alloc
+                break
+        if target is None:
+            raise ConflictError(
+                f"Allocation {product_id}/{batch_id}/{location_id} not on active "
+                f"reservation {reference_type}:{reference_id}")
+        qty = float(quantity if quantity is not None else target["allocate"])
+        if qty <= 0 or qty > float(target["allocate"]) + 1e-9:
+            raise ValidationFailed(
+                f"Pick quantity {qty} exceeds allocation {target['allocate']}")
+        remaining_alloc = []
+        for alloc in resv.get("allocation", []):
+            if alloc is target:
+                left = round(float(alloc["allocate"]) - qty, 6)
+                if left > 1e-9:
+                    remaining_alloc.append({**alloc, "allocate": left})
+            else:
+                remaining_alloc.append(dict(alloc))
+        setd: Dict[str, Any] = {
+            "allocation": remaining_alloc,
+            "quantity": sum(float(a["allocate"]) for a in remaining_alloc),
+            "updated_at": now_iso()}
+        if not remaining_alloc:
+            setd["status"] = "CONSUMED"
+        cas = await db.db.reservations.update_one(
+            {"_id": resv["_id"], "version": resv.get("version", 0)},
+            {"$set": setd, "$inc": {"version": 1}})
+        if not cas.modified_count:
+            continue  # lost the race: re-read and retry
+        # reservation row updated — post the RESERVED outflow movement
+        mv = await record_movement(
+            movement_type=movement_type,
+            product_id=product_id,
+            warehouse_id=target["warehouse_id"],
+            quantity=qty,
+            uom=target.get("uom", "BOX"),
+            batch_id=target["batch_id"] if target["batch_id"] != "UNBATCHED" else None,
+            location_id=target.get("location_id"),
+            stock_status="RESERVED",
+            reference_type=reference_type,
+            reference_id=reference_id,
+            performed_by=actor,
+        )
+        return mv
+    raise ConflictError(
+        f"Reservation {reference_type}:{reference_id} concurrently modified "
+        "too many times; retry the pick")
 
 
 async def consume_reservation(reference_type: str, reference_id: str,

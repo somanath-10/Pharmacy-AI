@@ -8,6 +8,22 @@ const FEATURES = [
   ["🔒", "SoD-enforced approvals, MFA-ready auth, short-lived tokens, revocable sessions"],
 ];
 
+const DEMO_ROLES = [
+  ["admin@pharmaos.local", "Super Admin", "SUPER_ADMIN"],
+  ["pharmacist@pharmaos.local", "Pharmacist", "PHARMACIST"],
+  ["warehouse@pharmaos.local", "Warehouse", "WAREHOUSE"],
+  ["plant@pharmaos.local", "Plant Operator", "PLANT"],
+  ["qc@pharmaos.local", "QC Analyst", "QC"],
+  ["qa@pharmaos.local", "QA Authority", "QA"],
+  ["buyer@pharmaos.local", "Buyer", "PROCUREMENT"],
+  ["sales@pharmaos.local", "Sales & CRM", "SALES"],
+  ["finance@pharmaos.local", "Finance", "FINANCE"],
+  ["logistics@pharmaos.local", "Logistics", "LOGISTICS"],
+  ["compliance@pharmaos.local", "Compliance", "COMPLIANCE"],
+  ["auditor@pharmaos.local", "Auditor", "AUDITOR"],
+  ["vendor@acmecorp.com", "Supplier Portal", "SUPPLIER"],
+];
+
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,6 +43,11 @@ export default function Login() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const quickFill = (userEmail) => {
+    setEmail(userEmail);
+    setPassword("Pharma@123");
   };
 
   return (
@@ -55,11 +76,11 @@ export default function Login() {
       </div>
 
       <div className="login-form-side">
-        <div className="login-card">
+        <div className="login-card" style={{ maxWidth: 440 }}>
           <div className="card-inner">
             <div className="logo-badge" style={{ width: 44, height: 44, fontSize: 23 }}>✦</div>
             <h1>Welcome back</h1>
-            <div className="sub">Sign in to your Pharma AI OS workspace.</div>
+            <div className="sub">Sign in to your Pharma AI OS role workspace.</div>
 
             <ErrorBox>{err}</ErrorBox>
             <form onSubmit={submit}>
@@ -96,20 +117,20 @@ export default function Login() {
               </button>
             </form>
 
-            <div className="demo-creds">
-              <b>Demo logins</b> — password <code className="kbd">Pharma@123</code>:
-              <div style={{ marginTop: 6 }}>
-                {[
-                  ["admin", "Super Admin"],
-                  ["qa", "QA"],
-                  ["warehouse", "Warehouse"],
-                  ["buyer", "Buyer"],
-                  ["finance", "Finance"],
-                ].map(([u, label]) => (
-                  <a key={u} href={`#${u}`}
-                     onClick={(e) => { e.preventDefault(); setEmail(`${u}@pharmaos.local`); setPassword("Pharma@123"); }}>
+            <div className="demo-creds" style={{ marginTop: 20 }}>
+              <b>1-Click Demo Logins</b> (Password: <code className="kbd">Pharma@123</code>):
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {DEMO_ROLES.map(([userEmail, label, roleCode]) => (
+                  <button
+                    key={userEmail}
+                    type="button"
+                    className="btn ghost sm"
+                    style={{ fontSize: 11, padding: "4px 8px" }}
+                    onClick={() => quickFill(userEmail)}
+                    title={`Role: ${roleCode}`}
+                  >
                     {label}
-                  </a>
+                  </button>
                 ))}
               </div>
             </div>

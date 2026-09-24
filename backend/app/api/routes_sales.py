@@ -190,6 +190,7 @@ async def attach_rx(order_id: str, payload: dict = Body(...),
 
 
 @sales_router.post("/pos/sale")
+@sales_router.post("/pos")
 async def pos_sale(payload: dict = Body(...),
                    principal: dict = Depends(get_current_principal)):
     idem = payload.pop("idempotency_key", None)
@@ -242,3 +243,53 @@ async def opp_close(opp_id: str, payload: dict = Body(...),
 async def customer_360(customer_id: str,
                        principal: dict = Depends(get_current_principal)):
     return await crm_svc.customer_360(customer_id)
+
+
+@crm_router.get("/tickets")
+async def list_tickets(status: Optional[str] = Query(None),
+                       principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+    q = {"status": status} if status else {}
+    rows = []
+    async for t in db.db.customer_tickets.find(q).sort("created_at", -1).limit(100):
+        t.pop("_id", None)
+        rows.append(t)
+    return rows
+
+
+@crm_router.post("/tickets")
+async def create_ticket(payload: dict = Body(...),
+                        principal: dict = Depends(get_current_principal)):
+    from app.core.database import db, now_iso, utcnow
+    from app.core.audit import audit
+    doc = {
+        "ticket_id": f"TCK-{int(utcnow().timestamp())}",
+        "customer_id": payload.get("customer_id"),
+        "customer_name": payload.get("customer_name", "Customer"),
+        "channel": payload.get("channel", "EMAIL"),
+        "subject": payload.get("subject", "Inquiry"),
+        "priority": payload.get("priority", "MEDIUM"),
+        "category": payload.get("category", "ORDER_STATUS"),
+        "status": "OPEN",
+        "description": payload.get("description", ""),
+        "ai_suggested_reply": payload.get("ai_suggested_reply") or "Thank you for reaching out. We have received your inquiry and our agent is tracking your order in real time.",
+        "created_at": now_iso(),
+    }
+    await db.db.customer_tickets.insert_one(doc)
+    await audit("CRM", doc["ticket_id"], "TICKET_CREATED", principal)
+    doc.pop("_id", None)
+    return doc
+
+
+@crm_router.post("/tickets/{ticket_id}/resolve")
+async def resolve_ticket(ticket_id: str, payload: dict = Body(default={}),
+                         principal: dict = Depends(get_current_principal)):
+    from app.core.database import db, now_iso
+    from app.core.audit import audit
+    await db.db.customer_tickets.update_one(
+        {"ticket_id": ticket_id},
+        {"$set": {"status": "RESOLVED", "resolution_notes": payload.get("notes", "Resolved by agent"), "resolved_at": now_iso()}}
+    )
+    await audit("CRM", ticket_id, "TICKET_RESOLVED", principal)
+    return {"ticket_id": ticket_id, "status": "RESOLVED"}
+

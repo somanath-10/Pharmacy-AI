@@ -329,6 +329,12 @@ async def list_bids(event_id: str,
     return await sourcing_svc.list_bids(event_id)
 
 
+@sourcing_router.post("/events/{event_id}/complete-bidding")
+async def complete_bidding(event_id: str,
+                           principal: dict = Depends(require_permission("sourcing:write"))):
+    return await sourcing_svc.complete_bidding(event_id, principal)
+
+
 @sourcing_router.post("/events/{event_id}/auction")
 async def create_auction(event_id: str, payload: dict = Body(...),
                          principal: dict = Depends(require_permission("sourcing:write"))):

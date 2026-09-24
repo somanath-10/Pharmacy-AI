@@ -444,6 +444,10 @@ async def pick(payload: dict, actor: dict) -> dict:
                 "product_id": line["sku"],
                 "batch_id": alloc["batch_id"],
                 "warehouse_id": alloc["warehouse_id"],
+                # the exact bin this allocation holds — confirm_pick consumes
+                # THIS allocation, so the task must identify it (multi-bin
+                # batches otherwise make allocation lookup ambiguous)
+                "location_id": alloc.get("location_id"),
                 "quantity": alloc["allocate"],
                 "status": "PENDING",
                 "created_at": now_iso(),
@@ -482,6 +486,7 @@ async def confirm_pick(task_id: str, actor: dict,
     await inventory.consume_reservation_allocation(
         task["product_id"], "SALES_ORDER", task["sales_order_id"], "SALE",
         batch_id=task["batch_id"], warehouse_id=task["warehouse_id"],
+        location_id=task.get("location_id"),
         quantity=float(task["quantity"]), actor=actor)
     await db.db.pick_tasks.update_one(
         {"task_id": task_id},

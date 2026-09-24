@@ -62,7 +62,12 @@ async def run_seed(demo: bool = False):
 
 async def _seed_users():
     for email, password, name, roles, vendor_marker in ROLES_USERS:
-        if await db.db.users.find_one({"email": email}):
+        existing = await db.db.users.find_one({"email": email})
+        if existing:
+            await db.db.users.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"failed_logins": 0, "locked_until": None, "status": "ACTIVE"}}
+            )
             continue
         vendor_id = None
         if vendor_marker == "VENDOR_PORTAL":

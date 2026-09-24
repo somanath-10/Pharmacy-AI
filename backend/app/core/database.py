@@ -182,6 +182,7 @@ class Database:
                             IndexModel([("status", ASCENDING)])],
             "dispenses": [IndexModel([("dispense_id", ASCENDING)]),
                           IndexModel([("rx_id", ASCENDING)])],
+            "dispenses": [IndexModel([("dispense_id", ASCENDING)])],
             "purchase_requisitions": [IndexModel([("pr_id", ASCENDING)])],
             "purchase_orders": [
                 IndexModel([("po_id", ASCENDING)]),
@@ -226,6 +227,7 @@ class Database:
                                   IndexModel([("status", ASCENDING)])],
             "customer_invoices": [IndexModel([("invoice_id", ASCENDING)]),
                                   IndexModel([("sales_order_id", ASCENDING)])],
+            "customer_invoices": [IndexModel([("invoice_id", ASCENDING)])],
             "payments": [IndexModel([("payment_id", ASCENDING)])],
             "gl_entries": [IndexModel([("account", ASCENDING)]),
                             IndexModel([("created_at", DESCENDING)])],

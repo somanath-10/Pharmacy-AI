@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5173",
+    "dev": "vite --port 4109",
     "build": "vite build",
-    "preview": "vite preview --port 5173",
+    "preview": "vite preview --port 4109",
     "test": "vite build"
   },
   "dependencies": {

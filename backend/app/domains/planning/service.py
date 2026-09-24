@@ -347,6 +347,29 @@ async def accept_proposal(proposal_id: str, actor: dict) -> dict:
     return result
 
 
+async def decide_proposal(proposal_id: str, decision: str, actor: dict,
+                          reason: Optional[str] = None) -> dict:
+    """Decide on a planning proposal: ACCEPTED/APPROVED executes it, REJECTED closes it."""
+    dec = (decision or "APPROVED").upper()
+    if dec in ("ACCEPTED", "APPROVED"):
+        return await accept_proposal(proposal_id, actor)
+    elif dec in ("REJECTED", "DECLINED"):
+        prop = await db.db.planning_proposals.find_one({"proposal_id": proposal_id})
+        if not prop:
+            raise NotFound(f"Proposal {proposal_id} not found")
+        if prop["status"] != "PROPOSED":
+            raise ValidationFailed(f"Proposal already processed: {prop['status']}")
+        await db.db.planning_proposals.update_one(
+            {"proposal_id": proposal_id},
+            {"$set": {"status": "REJECTED", "rejected_at": now_iso(),
+                      "reject_reason": reason or "User rejected"}})
+        await audit("PLANNING_PROPOSAL", proposal_id, "REJECTED", actor,
+                    details={"reason": reason})
+        return {"proposal_id": proposal_id, "status": "REJECTED"}
+    else:
+        raise ValidationFailed(f"Invalid proposal decision: {decision}")
+
+
 async def list_proposals(status: Optional[str] = None) -> List[dict]:
     q = {} if not status else {"status": status}
     return [_clean(dict(r)) async for r in

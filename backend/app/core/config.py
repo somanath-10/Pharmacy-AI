@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     ENV: str = "development"  # development | staging | production
     API_PREFIX: str = "/api"
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:4109,http://localhost:4108,http://localhost:5173,http://localhost:3000,http://127.0.0.1:4109,http://127.0.0.1:4108"
 
     # Database
     MONGODB_URI: str = "mongodb://localhost:27017"
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     # MFA (TOTP; MFA-ready architecture)
     MFA_ENABLED: bool = False           # global kill-switch (tests/dev)
     MFA_ENFORCE_ROLES: str = "SUPER_ADMIN"  # roles that MUST enroll
+    MFA_ENFORCE_ROLES: str = ""         # roles that MUST enroll (e.g. "SUPER_ADMIN" when enabled)
 
     # AI
     OPENAI_API_KEY: Optional[str] = ""

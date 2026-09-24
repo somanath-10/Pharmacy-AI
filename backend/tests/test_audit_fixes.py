@@ -160,6 +160,156 @@ async def test_pick_task_consumes_only_its_allocation():
     assert order["status"] == "PICKING", "order stays PICKING until B is picked"
 
 
+# ===================== F'. multi-bin batch: each pick drains its own allocation
+async def test_pick_bin_split_batch_consumes_exact_bin():
+    """One batch, two bins: FEFO reserves 6@A-01 + 4@B-02. Each pick task must
+    consume exactly ITS bin's allocation (previously the task carried no bin,
+    so allocation lookup failed for the whole multi-bin pick wave)."""
+    from app.domains.masters.service import create_product, create_customer
+    cust_code = f"CUS-AF-{_uid()}"
+    try:
+        await create_customer({"code": cust_code, "name": "AF Cust", "contact": {}}, ADMIN)
+    except Exception:
+        pass
+    c_doc = await db.db.customers.find_one({"code": cust_code}) or \
+        await db.db.customers.find_one()
+    sku = f"PRD-MB-{_uid()}"
+    try:
+        await create_product({"sku": sku, "name": sku, "type": "TRADE_ITEM",
+                              "uom": "BOX", "standard_cost": 1, "price": 2})
+    except Exception:
+        pass
+    batch = f"B-MB-{_uid()}"
+    await inventory.ensure_batch(sku, batch, "2032-06-01")
+    await db.db.batches.update_one({"batch_id": batch},
+                                   {"$set": {"qa_status": "RELEASED",
+                                             "blocked": False}})
+    for loc, qty in (("A-01", 6), ("B-02", 4)):
+        await inventory.record_movement(
+            "PURCHASE_RECEIPT", sku, "WH-MAIN", qty, batch_id=batch,
+            location_id=loc, reference_type="TEST",
+            reference_id=f"rc-{_uid()}", performed_by=ADMIN)
+        await inventory.change_stock_status(
+            sku, "WH-MAIN", batch, "QUARANTINE", "AVAILABLE", qty,
+            actor=ADMIN, location_id=loc, reference_type="TEST",
+            reference_id=f"rel-{_uid()}")
+    so = await sales_svc.create_sales_order(
+        {"customer_id": c_doc["code"], "lines": [{"sku": sku, "quantity": 10}]},
+        ADMIN)
+    await sales_svc.confirm_order(so["order_id"], ADMIN)
+    await sales_svc.allocate_order(so["order_id"], ADMIN)
+    wave = await warehouse_svc.pick({"sales_order_id": so["order_id"]}, ADMIN)
+    assert len(wave["tasks"]) == 2, "one task per bin allocation"
+    assert all(t.get("location_id") for t in wave["tasks"]), \
+        "each task must carry its allocation bin"
+    for t in wave["tasks"]:
+        await warehouse_svc.confirm_pick(t["task_id"], ADMIN)
+    rows = [r async for r in db.db.inventory_balances.find(
+        {"product_id": sku, "batch_id": batch, "stock_status": "RESERVED"})]
+    for r in rows:
+        assert float(r["quantity"]) == 0.0, \
+            f"bin {r['location_id']} RESERVED must be 0 after pick, got {r['quantity']}"
+    neg = [r async for r in db.db.inventory_balances.find(
+        {"product_id": sku, "quantity": {"$lt": 0}})]
+    assert not neg, "no negative balances may exist"
+    rsv = await db.db.reservations.find_one(
+        {"reference_type": "SALES_ORDER", "reference_id": so["order_id"]})
+    assert rsv["status"] == "CONSUMED"
+
+
+# ================= terminal reservation must not wedge re-reservation (A')
+async def test_reserve_after_release_supersedes_terminal_reservation():
+    """The unique (reference, product) index outlives a released reservation;
+    re-reserving the same reference must supersede the terminal row instead of
+    failing forever, and balances must stay exact across the cycle."""
+    from app.domains.masters.service import create_product
+    sku = f"PRD-RS-{_uid()}"
+    try:
+        await create_product({"sku": sku, "name": sku, "type": "TRADE_ITEM",
+                              "uom": "BOX", "standard_cost": 1, "price": 2})
+    except Exception:
+        pass
+    batch = f"B-RS-{_uid()}"
+    await inventory.ensure_batch(sku, batch, "2032-06-01")
+    await db.db.batches.update_one({"batch_id": batch},
+                                   {"$set": {"qa_status": "RELEASED",
+                                             "blocked": False}})
+    await inventory.record_movement(
+        "OPENING_STOCK", sku, "WH-MAIN", 10, batch_id=batch,
+        reference_type="TEST", reference_id=f"os-{_uid()}",
+        performed_by={"type": "SYSTEM", "id": "af"})
+    ref = f"RETRY-{_uid()}"
+    await inventory.reserve(sku, 4, "SO", ref, "WH-MAIN", ADMIN)
+    await inventory.release_reservation("SO", ref, actor=ADMIN)
+    r2 = await inventory.reserve(sku, 4, "SO", ref, "WH-MAIN", ADMIN)
+    assert r2["status"] == "ACTIVE" and float(r2["quantity"]) == 4.0
+    av = await inventory.availability(sku)
+    assert av["available"] == 6.0 and av["reserved"] == 4.0, \
+        f"balances must reconstruct exactly across the cycle: {av}"
+
+
+
+# ============ concurrent partial releases must not desync the reservation doc
+async def test_concurrent_partial_release_stays_consistent():
+    """Two interleaved partial releases of the same reservation: the version
+    CAS must make the loser re-read its allocation rows, so doc.quantity,
+    the allocation sum, and the RESERVED balance always agree."""
+    import asyncio
+    from app.domains.masters.service import create_product
+    sku = f"PRD-CR-{_uid()}"
+    try:
+        await create_product({"sku": sku, "name": sku, "type": "TRADE_ITEM",
+                              "uom": "BOX", "standard_cost": 1, "price": 2})
+    except Exception:
+        pass
+    batch = f"B-CR-{_uid()}"
+    await inventory.ensure_batch(sku, batch, "2032-06-01")
+    await db.db.batches.update_one({"batch_id": batch},
+                                   {"$set": {"qa_status": "RELEASED",
+                                             "blocked": False}})
+    await inventory.record_movement(
+        "OPENING_STOCK", sku, "WH-MAIN", 10, batch_id=batch,
+        location_id="C-01", reference_type="TEST", reference_id=f"os-{_uid()}",
+        performed_by={"type": "SYSTEM", "id": "af"})
+    ref = f"CR-{_uid()}"
+    await inventory.reserve(sku, 8, "SO", ref, "WH-MAIN", ADMIN)
+
+    # force the dangerous interleave: the first leg-writes yield control long
+    # enough for the other release to claim + read a stale allocation snapshot
+    orig_leg = inventory._post_status_leg
+    state = {"n": 0}
+
+    async def slow_leg(*a, **kw):
+        state["n"] += 1
+        n = state["n"]
+        await asyncio.sleep(0.05 if n <= 2 else 0)
+        return await orig_leg(*a, **kw)
+
+    inventory._post_status_leg = slow_leg
+    try:
+        results = await asyncio.gather(
+            inventory.release_reservation_partial("SO", ref, sku, 3, actor=ADMIN),
+            inventory.release_reservation_partial("SO", ref, sku, 3, actor=ADMIN),
+            return_exceptions=True)
+    finally:
+        inventory._post_status_leg = orig_leg
+    assert not any(isinstance(r, Exception) for r in results), \
+        f"both releases should succeed: {results}"
+    doc = await db.db.reservations.find_one({"reference_id": ref})
+    alloc_sum = sum(float(a["allocate"]) for a in doc.get("allocation") or [])
+    assert abs(alloc_sum - float(doc["quantity"])) <= 1e-9, \
+        f"doc.quantity {doc['quantity']} diverged from allocation sum {alloc_sum}"
+    bal = await db.db.inventory_balances.find_one(
+        {"product_id": sku, "batch_id": batch, "location_id": "C-01",
+         "stock_status": "RESERVED"})
+    assert float(bal["quantity"]) == float(doc["quantity"]), \
+        "RESERVED balance must equal the remaining reservation"
+
+
+
+
+
+
 # ============================================= I. prescription sales order path
 async def test_rx_order_full_path():
     """Rx-required SO: DRAFT→PENDING_RX→RX_APPROVED→CONFIRMED→allocate."""

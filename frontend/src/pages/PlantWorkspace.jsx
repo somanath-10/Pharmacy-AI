@@ -25,6 +25,34 @@ export default function PlantWorkspace() {
   const [packFor, setPackFor] = useState(null);
   const [packForm, setPackForm] = useState({ pack_size: "", packs_produced: "", label_code: "" });
   const [planForm, setPlanForm] = useState({ product_id: "", quantity: 500 });
+
+  // Operator Work Center State
+  const [opShift, setOpShift] = useState("Shift A (06:00 - 14:00)");
+  const [opLine, setOpLine] = useState("LINE-01 (Solid Oral Tablet Press)");
+  const [opOrder, setOpOrder] = useState("");
+  const [lineClearance, setLineClearance] = useState({
+    area_sanitized: true,
+    prior_batch_cleared: true,
+    dust_extraction_on: true,
+    hvac_pressure_ok: true,
+    logbook_signed: true,
+  });
+  const [dualSign, setDualSign] = useState({
+    material_code: "RM-PARACETAMOL-01",
+    target_weight: "50.00 kg",
+    measured_weight: "50.02 kg",
+    weigher: "OP-042 (R. Sharma)",
+    checker: "CHK-018 (V. Patel)",
+    status: "VERIFIED"
+  });
+  const [ipcTests, setIpcTests] = useState([
+    { time: "09:30", test: "Average Tablet Weight", spec: "500 ± 15 mg", result: "502.4 mg", status: "PASS" },
+    { time: "10:15", test: "Hardness (kp)", spec: "6.0 - 9.0 kp", result: "7.8 kp", status: "PASS" },
+    { time: "11:00", test: "Friability", spec: "< 1.0 %", result: "0.22 %", status: "PASS" },
+    { time: "11:45", test: "Disintegration Time", spec: "< 15 mins", result: "4 mins 30s", status: "PASS" },
+  ]);
+  const [downtimeLog, setDowntimeLog] = useState("");
+
   const { toast, toastHost } = useToast();
 
   const load = async () => {
@@ -36,6 +64,9 @@ export default function PlantWorkspace() {
         api("/api/production/yield-anomalies").catch(() => null),
       ]);
       setOrders(Array.isArray(o) ? o : o.items || []);
+      const ords = Array.isArray(o) ? o : o.items || [];
+      setOrders(ords);
+      if (ords.length > 0 && !opOrder) setOpOrder(ords[0].order_id);
       setPlans(Array.isArray(p) ? p : p.items || []);
       setEquipment(Array.isArray(e) ? e : e.items || []);
       setBoms(Array.isArray(b) ? b : b.items || []);
@@ -76,10 +107,13 @@ export default function PlantWorkspace() {
       {toastHost}
       <Topbar title="Plant / Production (MES)"
               sub="Demand → plan → order → BOM → reservation → issue → eBMR → FG → QC → QA release → warehouse" />
+      <Topbar title="Plant & Manufacturing (MES / eBPR)"
+              sub="Master formula → routing → order release gate → eBPR execution → IPC testing → yield reconciliation" />
       {err && <div className="error-box mb">{err}</div>}
 
       <div className="grid kpi-4 mb">
         <Kpi ico="🏭" label="Active batches" value={openOrders.length} tone="blue" />
+        <Kpi ico="🛠️" label="Operator station" value={opLine.split(" ")[0]} tone="teal" />
         <Kpi ico="⚠️" label="Equipment attention" value={equipAttention} tone={equipAttention ? "orange" : "green"} />
         <Kpi ico="📉" label="Yield anomalies" value={anomalies ? anomalies.flagged.length : "—"}
              tone={anomalies && anomalies.flagged.length ? "red" : "green"} />
@@ -89,6 +123,7 @@ export default function PlantWorkspace() {
       <div className="row mb wrap">
         <CountTabs tabs={[
           { label: "Production Orders", count: openOrders.length },
+          { label: "Operator Work Center", count: null },
           { label: "Plans", count: plans.length },
           { label: "Traceability", count: null },
           { label: "Equipment", count: equipAttention },
@@ -151,6 +186,143 @@ export default function PlantWorkspace() {
                     { key: "calibration_status", label: "Calib", render: (r) => <Badge>{r.calibration_status}</Badge> },
                     { key: "status", label: "Status", render: (r) => <Badge>{r.status}</Badge> },
                   ]} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === "Operator Work Center" && (
+          <div className="grid cols-2">
+            <div>
+              <div className="card mb">
+                <div className="row">
+                  <h3>Operator Station & Shift Sign-in</h3>
+                  <div className="spacer" />
+                  <span className="badge green">21 CFR Part 11 Active</span>
+                </div>
+                <div className="card-sub">Line operator workstation with mandatory dual verification gates</div>
+                <div className="row wrap gap mb">
+                  <Field label="Shift">
+                    <select value={opShift} onChange={(e) => setOpShift(e.target.value)}>
+                      <option>Shift A (06:00 - 14:00)</option>
+                      <option>Shift B (14:00 - 22:00)</option>
+                      <option>Shift C (22:00 - 06:00)</option>
+                    </select>
+                  </Field>
+                  <Field label="Work Center / Line">
+                    <select value={opLine} onChange={(e) => setOpLine(e.target.value)}>
+                      <option>LINE-01 (Solid Oral Tablet Press)</option>
+                      <option>LINE-02 (Granulation & Fluid Bed Dryer)</option>
+                      <option>LINE-03 (Blister Packaging Machine)</option>
+                    </select>
+                  </Field>
+                  <Field label="Active Batch Order">
+                    <select value={opOrder} onChange={(e) => setOpOrder(e.target.value)}>
+                      {orders.map((o) => (
+                        <option key={o.order_id} value={o.order_id}>{o.order_id} ({o.product_id})</option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+
+                <div className="section-title">Pre-Operational Line Clearance (GMP)</div>
+                <div className="grid" style={{ gap: 8 }}>
+                  <label className="row" style={{ gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={lineClearance.area_sanitized}
+                           onChange={(e) => setLineClearance({ ...lineClearance, area_sanitized: e.target.checked })} />
+                    <span>Area & tooling sanitized and free of previous product residues</span>
+                  </label>
+                  <label className="row" style={{ gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={lineClearance.prior_batch_cleared}
+                           onChange={(e) => setLineClearance({ ...lineClearance, prior_batch_cleared: e.target.checked })} />
+                    <span>All prior batch packaging, labels, and printed foils completely cleared</span>
+                  </label>
+                  <label className="row" style={{ gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={lineClearance.dust_extraction_on}
+                           onChange={(e) => setLineClearance({ ...lineClearance, dust_extraction_on: e.target.checked })} />
+                    <span>HVAC differential pressure and dust extraction within validated limits</span>
+                  </label>
+                  <label className="row" style={{ gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={lineClearance.logbook_signed}
+                           onChange={(e) => setLineClearance({ ...lineClearance, logbook_signed: e.target.checked })} />
+                    <span>Machine equipment logbook signed by QA Line Inspector</span>
+                  </label>
+                </div>
+                <div className="row mt">
+                  <button className="btn approve sm" onClick={() => toast("Line clearance verified and locked in eBMR", "ok")}>
+                    ✓ Confirm Line Clearance
+                  </button>
+                </div>
+              </div>
+
+              <div className="card">
+                <h3>Dual Sign-Off Weighing & Dispensing Station</h3>
+                <div className="card-sub">Mandatory four-eyes principle (Weigher + Checker) for Active Pharmaceutical Ingredients (API)</div>
+                <div className="card tinted mb">
+                  <div className="row">
+                    <b>Material:</b> <span className="mono">{dualSign.material_code}</span>
+                  </div>
+                  <div className="row mt">
+                    <span>Target: <b>{dualSign.target_weight}</b></span>
+                    <span>Actual Scale Reading: <b style={{ color: "var(--green)" }}>{dualSign.measured_weight}</b></span>
+                  </div>
+                  <div className="row mt small muted">
+                    <span>Weigher: {dualSign.weigher}</span>
+                    <span>Checker: {dualSign.checker}</span>
+                  </div>
+                </div>
+                <div className="row">
+                  <button className="btn primary sm" onClick={() => toast("Dual signature recorded: Tare 0.00kg, Gross 50.02kg verified", "ok")}>
+                    ✍️ Capture Dual Electronic Signature
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div className="card mb">
+                <div className="row">
+                  <h3>In-Process Quality Control (IPC)</h3>
+                  <div className="spacer" />
+                  <span className="badge blue">Hourly Sampling</span>
+                </div>
+                <div className="card-sub">Real-time physical tablet testing at the press station</div>
+                <Table rows={ipcTests} columns={[
+                  { key: "time", label: "Time" },
+                  { key: "test", label: "Parameter" },
+                  { key: "spec", label: "Acceptance Spec" },
+                  { key: "result", label: "Measured", render: (r) => <b>{r.result}</b> },
+                  { key: "status", label: "Result", render: (r) => <span className="badge green">{r.status}</span> },
+                ]} />
+                <div className="row mt">
+                  <button className="btn ghost sm" onClick={() => toast("IPC test sample logged to QC LIMS", "ok")}>
+                    + Record IPC Inspection
+                  </button>
+                </div>
+              </div>
+
+              <div className="card">
+                <h3>Machine Telemetry & Downtime Log</h3>
+                <div className="card-sub">Station sensor telemetry and maintenance callout</div>
+                <div className="grid cols-2 mb" style={{ gap: 10 }}>
+                  <div className="card tinted">
+                    <small className="muted">Main Compression Force</small>
+                    <div style={{ fontSize: 20, fontWeight: "bold" }}>18.2 kN</div>
+                    <small style={{ color: "var(--green)" }}>Target: 18 - 22 kN</small>
+                  </div>
+                  <div className="card tinted">
+                    <small className="muted">Turret Speed</small>
+                    <div style={{ fontSize: 20, fontWeight: "bold" }}>45 RPM</div>
+                    <small style={{ color: "var(--green)" }}>Target: 40 - 50 RPM</small>
+                  </div>
+                </div>
+                <Field label="Shift Handover / Breakdown Notes">
+                  <textarea rows={3} value={downtimeLog} placeholder="e.g. 15 min stoppage for punch lubrication; tooling in good condition"
+                            onChange={(e) => setDowntimeLog(e.target.value)} />
+                </Field>
+                <button className="btn primary sm" onClick={() => { toast("Handover log appended to shift report", "ok"); setDowntimeLog(""); }}>
+                  Save Shift Log
+                </button>
               </div>
             </div>
           </div>

@@ -283,6 +283,15 @@ async def recommend_award(event_id: str, payload: dict, actor: dict) -> dict:
     return doc
 
 
+async def complete_bidding(event_id: str, actor: dict) -> dict:
+    """Closes bidding on a sourcing event and moves it to EVALUATION."""
+    evt = await _get(event_id)
+    if evt["status"] in ("PUBLISHED", "BIDDING"):
+        await transition("sourcing_event", event_id, "sourcing_events", "event_id",
+                         "EVALUATION", actor, reason="Bidding closed")
+    return await _get(event_id)
+
+
 async def _ai_analyze_award(rec: dict, bids: List[dict]) -> dict:
     """AI consultation on the BRA (draft/advisory only; offline fallback)."""
     from app.core.ai_gateway import ai

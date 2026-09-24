@@ -264,6 +264,15 @@ async def accept_proposal(proposal_id: str,
     return await plan_svc.accept_proposal(proposal_id, principal)
 
 
+@planning_router.post("/proposals/{proposal_id}/decide")
+async def decide_proposal(proposal_id: str,
+                          payload: dict = Body(default={}),
+                          principal: dict = Depends(get_current_principal)):
+    decision = payload.get("decision", "APPROVED")
+    reason = payload.get("reason")
+    return await plan_svc.decide_proposal(proposal_id, decision, principal, reason)
+
+
 # ------------------------------------------------------------------ stock plans
 @planning_router.post("/stock-plans")
 async def create_stock_plan(payload: dict = Body(...),

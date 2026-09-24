@@ -51,6 +51,21 @@ async function doRefresh() {
   return refreshing;
 }
 
+function extractErrorMessage(data, status, path) {
+  if (data) {
+    if (typeof data.detail === "string") return data.detail;
+    if (Array.isArray(data.detail) && data.detail.length > 0) {
+      return data.detail.map((d) => d.msg || JSON.stringify(d)).join(", ");
+    }
+    if (data.message) return typeof data.message === "string" ? data.message : JSON.stringify(data.message);
+    if (data.error) return typeof data.error === "string" ? data.error : JSON.stringify(data.error);
+  }
+  if (status === 401) {
+    return path.startsWith("/api/auth/") ? "Invalid email or password" : "Session expired. Please sign in again.";
+  }
+  return `Request failed (${status})`;
+}
+
 export async function api(path, { method = "GET", body, headers = {}, idemKey } = {}) {
   const h = { ...headers };
   if (token) h.Authorization = `Bearer ${token}`;
@@ -68,14 +83,17 @@ export async function api(path, { method = "GET", body, headers = {}, idemKey } 
     if (ok) return api(path, { method, body, headers, idemKey });
     setAuth(null, null); emit();
     throw new Error("Session expired");
+    throw new Error(extractErrorMessage(data, 401, path));
   }
   if (res.status === 401) {
     if (!path.startsWith("/api/auth/")) { setAuth(null, null); emit(); }
     throw new Error((data && data.message) || "Session expired");
+    throw new Error(extractErrorMessage(data, 401, path));
   }
   if (!res.ok) {
     const msg = (data && (data.message || data.error)) || `Request failed (${res.status})`;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    throw new Error(extractErrorMessage(data, res.status, path));
   }
   return data;
 }

@@ -36,8 +36,17 @@ class Storage:
             self._mode = "gridfs"
         if self._mode is None:
             self._mode = "local"
-        os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
+        self._ensure_local_dir()
         log.info("storage mode=%s", self._mode)
+
+    def _ensure_local_dir(self):
+        """The local fallback must never fail just because the directory is
+        missing (fresh checkout / CI / first use before init())."""
+        try:
+            os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
+        except OSError as e:
+            log.warning("could not create upload dir %s: %s",
+                        settings.LOCAL_UPLOAD_DIR, e)
 
     @property
     def mode(self) -> str:
@@ -45,6 +54,8 @@ class Storage:
 
     async def put(self, content: bytes, filename: str, content_type: str = "") -> Tuple[str, str]:
         """Store bytes → returns (ref, storage_mode)."""
+        if self._mode is None:  # not init()'d (e.g. service-level tests)
+            await self.init()
         if self._mode == "s3":
             key = filename
             await asyncio_s3_put(self._s3, settings.S3_BUCKET, key, content, content_type)
@@ -54,11 +65,20 @@ class Storage:
 
             fid = await db.gridfs.upload_from_stream(filename, content)
             return f"gridfs://{fid}", "gridfs"
-        path = os.path.join(settings.LOCAL_UPLOAD_DIR, filename)
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        path = self._local_path(filename)
+        self._ensure_local_dir()
         with open(path, "wb") as f:
             f.write(content)
         return f"local://{path}", "local"
+
+    @staticmethod
+    def _local_path(filename: str) -> str:
+        """Flatten client-supplied names: no path separators (traversal), no
+        collisions between same-named files from different uploads."""
+        import uuid
+
+        base = os.path.basename(str(filename or "file")) or "file"
+        return os.path.join(settings.LOCAL_UPLOAD_DIR, f"{uuid.uuid4().hex}_{base}")
 
     async def get(self, ref: str) -> Optional[bytes]:
         if ref.startswith("s3://"):

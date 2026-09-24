@@ -46,8 +46,6 @@ async def tick(max_work: int = 50) -> dict:
         results["actions"].append({"action": "REAP_AGENT_CALLS", "count": reaped})
 
     # 2. Retry failed outbox events
-    from app.core.events import bus
-
     processed = await bus.pump_once(limit=100)
     results["actions"].append({"action": "OUTBOX_PUMP", "processed": processed})
 
