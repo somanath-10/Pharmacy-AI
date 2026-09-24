@@ -54,7 +54,28 @@ class EventBus:
         )
         # Mirror into activity stream for UI timelines
         await db.db.events.insert_one(event)
-        await self._dispatch(name, payload, event["actor"])
+        # Inline dispatch is best-effort: the outbox pump remains the durable
+        # path. Claim the row FIRST so the pump can never double-dispatch the
+        # same event after we've run handlers here (P0 7.1).
+        claimed = await db.db.outbox_events.find_one_and_update(
+            {"name": name, "payload": payload, "status": "PENDING"},
+            {"$set": {"status": "PROCESSING", "claimed_at": now_iso()}},
+        )
+        if claimed is None:
+            return  # pump already owns this event
+        try:
+            await self._dispatch(name, payload, event["actor"])
+        except Exception:
+            # release for pump retry with the error recorded — never DONE
+            await db.db.outbox_events.update_one(
+                {"_id": claimed["_id"], "status": "PROCESSING"},
+                {"$set": {"status": "PENDING", "claimed_at": None,
+                          "last_error": "inline dispatch failure"}})
+            return
+        await db.db.outbox_events.update_one(
+            {"_id": claimed["_id"], "status": "PROCESSING"},
+            {"$set": {"status": "DONE", "processed_at": now_iso()},
+             "$inc": {"attempts": 1}})
 
     async def _dispatch(self, name: str, payload: dict, actor: dict):
         for handler in self._handlers.get(name, []):
@@ -90,12 +111,9 @@ class EventBus:
             try:
                 await self._dispatch(row["name"], row["payload"],
                                      row.get("actor"))
-                await db.db.outbox_events.update_one(
-                    {"_id": row["_id"], "status": "PROCESSING"},
-                    {"$set": {"status": "DONE", "processed_at": now_iso()},
-                     "$inc": {"attempts": 1}},
-                )
             except Exception as e:
+                # Handler failure must NOT be marked DONE (P0 7.2): retry with
+                # backoff until the attempt cap, then FAILED (DLQ-able).
                 attempts = row.get("attempts", 0) + 1
                 status = "FAILED" if attempts >= 5 else "PENDING"
                 await db.db.outbox_events.update_one(
@@ -103,6 +121,13 @@ class EventBus:
                     {"$set": {"status": status, "last_error": str(e)[:500]},
                      "$inc": {"attempts": 1}},
                 )
+                processed += 1
+                continue
+            await db.db.outbox_events.update_one(
+                {"_id": row["_id"], "status": "PROCESSING"},
+                {"$set": {"status": "DONE", "processed_at": now_iso()},
+                 "$inc": {"attempts": 1}},
+            )
             processed += 1
         return processed
 
