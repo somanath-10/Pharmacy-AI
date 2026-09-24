@@ -1,13 +1,14 @@
 """Finance: event-driven postings, supplier invoices + 2/3/4-way matching,
 credit notes, AP payments + authorization, AR + cash application,
 reconciliation, valuation, GL."""
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.database import db, now_iso
-from app.core.errors import ConflictError, DomainError, NotFound, ValidationFailed
+from app.core.errors import ConflictError, NotFound, ValidationFailed
+from pymongo.errors import DuplicateKeyError
 from app.core.events import bus
 from app.core.idempotency import idempotent
 from app.core.policies import evaluate_payment_authorization, get_rule as _get_rule
@@ -98,6 +99,15 @@ async def receive_supplier_invoice(payload: dict, actor: dict,
     po = await db.db.purchase_orders.find_one({"po_id": payload["po_id"]})
     if not po:
         raise NotFound(f"PO {payload['po_id']} not found")
+    # Duplicate guard (unique index is the hard stop; this is the friendly one)
+    sup_no = payload.get("supplier_invoice_number")
+    if sup_no:
+        dup = await db.db.supplier_invoices.find_one(
+            {"po_id": payload["po_id"], "supplier_invoice_number": sup_no})
+        if dup:
+            raise ConflictError(
+                f"Duplicate supplier invoice: {sup_no} already received for "
+                f"PO {payload['po_id']} as {dup['invoice_id']}")
     async with idempotent("SUP_INV", idempotency_key) as gate:
         if not gate["first_time"]:
             return gate["result"]
@@ -132,8 +142,17 @@ async def receive_supplier_invoice(payload: dict, actor: dict,
             "version": 1,
             "timeline": [{"state": "RECEIVED", "actor": actor, "at": now_iso()}],
         }
-        await db.db.supplier_invoices.insert_one(doc)
+        try:
+            await db.db.supplier_invoices.insert_one(doc)
+        except DuplicateKeyError:
+            # concurrent duplicate: the pre-check above passed for both, but the
+            # partial unique index on (po_id, supplier_invoice_number) let only
+            # one through — surface a real conflict, not a 500
+            raise ConflictError(
+                f"Duplicate supplier invoice: {doc['supplier_invoice_number']} "
+                f"already received for PO {po['po_id']}")
         await audit("SUPPLIER_INVOICE", invoice_id, "RECEIVED", actor,
+                    previous_state=None, new_state="RECEIVED",
                     details={"po": po["po_id"], "amount": doc["total_amount"]})
         result = _clean(doc)
     if payload.get("document_id"):
@@ -145,7 +164,8 @@ async def receive_supplier_invoice(payload: dict, actor: dict,
             await db.db.supplier_invoices.update_one(
                 {"invoice_id": invoice_id},
                 {"$set": {"extraction": data, "status": "EXTRACTED"}})
-        gate.store(result)
+            result["status"] = "EXTRACTED"
+    gate.store(result)
     return result
 
 
@@ -174,6 +194,7 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
                                           settings.MATCH_TOLERANCE_PCT))
     line_results = []
     total_variance = 0.0
+    blocked_reasons = []
     for line in inv["lines"]:
         po_line = next((l for l in po["lines"] if l["line_no"] == line["line_no"]), None)
         grn_qty = sum(
@@ -182,6 +203,16 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
         qa_qty = sum(
             float(gl.get("accepted_qty") or 0) for g in grns
             for gl in g.get("lines", []) if gl["line_no"] == line["line_no"])
+        # QA inspection state: a GRN line is dispositioned only when
+        # accepted + rejected == received. QA accepted == 0 with a full
+        # rejection IS inspected data (everything was rejected) — it must
+        # stay 0. Never fall back to grn_qty when QA accepted is 0.
+        qa_inspected = bool(grns) and all(
+            (float(gl.get("accepted_qty") or 0)
+             + float(gl.get("rejected_qty") or 0))
+            >= float(gl["received_qty"]) - 1e-9
+            for g in grns for gl in g.get("lines", [])
+            if gl["line_no"] == line["line_no"])
         inv_qty = float(line.get("quantity") or 0)
         po_qty = float(po_line["quantity"]) if po_line else 0.0
         unit_price = float(line.get("unit_price") or
@@ -190,21 +221,29 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
         if po_line and abs(unit_price - float(po_line["unit_price"])) > 0.001:
             price_var = (unit_price - float(po_line["unit_price"])) * inv_qty
         amount_var = price_var
-        # 4-way: qty billed vs QA-accepted (not just received)
-        qty_var = (inv_qty - qa_qty) if qa_qty > 0 else (inv_qty - grn_qty)
+        # 4-way: billed qty vs QA-accepted qty. If QA has not completed
+        # inspection of everything received for this line, BLOCK the match —
+        # an invoice must not pass on received-but-unverified quantity.
+        if grns and not qa_inspected:
+            blocked_reasons.append(
+                f"line {line['line_no']}: QA inspection incomplete "
+                f"(received {grn_qty:g}, QA accepted {qa_qty:g})")
+            qty_var = inv_qty  # nothing QA-verified is payable yet
+        else:
+            qty_var = inv_qty - qa_qty  # qa_qty may legitimately be 0
         amount_var += qty_var * unit_price
         total_variance += amount_var
         line_results.append({
             "line_no": line["line_no"],
             "po_qty": po_qty, "grn_qty": grn_qty, "qa_accepted_qty": qa_qty,
+            "qa_inspected": qa_inspected,
             "invoice_qty": inv_qty, "unit_price": unit_price,
             "qty_variance": round(qty_var, 3),
             "price_variance": round(price_var, 2),
             "amount_variance": round(amount_var, 2),
         })
     tol_amount = abs(float(po.get("total_amount") or 0)) * tolerance_pct / 100
-    matched = abs(total_variance) <= max(tol_amount, 0.01)
-    match_type = "FOUR_WAY" if any(g.get("lines") for g in grns) else "TWO_WAY"
+    match_type = "FOUR_WAY" if grns else "TWO_WAY"
 
     # credit notes already received offset the remaining variance (supplier corrected)
     credit_total = 0.0
@@ -212,11 +251,15 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
                                              "type": "CREDIT"}):
         credit_total += float(cn.get("amount") or 0)
     net_variance = round(total_variance - credit_total, 2)
-    matched = abs(net_variance) <= max(tol_amount, 0.01)
+    # QA-blocked invoices can never match regardless of variance/credit notes
+    matched = (abs(net_variance) <= max(tol_amount, 0.01)
+               and not blocked_reasons)
 
     result = {
         "type": match_type,
         "matched": matched,
+        "blocked": bool(blocked_reasons),
+        "blocked_reasons": blocked_reasons,
         "total_variance": net_variance,
         "gross_variance": round(total_variance, 2),
         "credit_notes_applied": round(credit_total, 2),
@@ -371,47 +414,104 @@ async def approve_matched_invoice(invoice_id: str, actor: dict) -> dict:
 
 
 # ------------------------------------------------------------------ payments AP
-async def create_payment_proposal(payload: dict, actor: dict) -> dict:
-    """AP payment proposal for approved invoices (optionally filtered by due)."""
-    invoice_ids = payload.get("invoice_ids")
-    if not invoice_ids:
-        cutoff = (datetime.utcnow() + timedelta(days=int(payload.get("due_days", 7)))
-                  ).strftime("%Y-%m-%d")
-        rows = [_clean(dict(r)) async for r in db.db.supplier_invoices.find({
-            "status": "APPROVED"})]
-        invoice_ids = [r["invoice_id"] for r in rows]
-    lines = []
-    total = 0.0
-    for iid in invoice_ids:
-        inv = await _get_inv(iid)
-        if inv["status"] != "APPROVED":
-            raise ConflictError(f"Invoice {iid} not APPROVED")
-        lines.append({"invoice_id": iid, "vendor_id": inv["vendor_id"],
-                      "amount": inv["total_amount"]})
-        total += inv["total_amount"]
-    payment_id = await _next_id("payment", "PAY")
-    doc = {
-        "payment_id": payment_id,
-        "type": "OUTGOING",
-        "lines": lines,
-        "amount": round(total, 2),
-        "currency": "INR",
-        "method": payload.get("method", "BANK_TRANSFER"),
-        "status": "PROPOSED",
-        "created_by": actor,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "version": 1,
-        "timeline": [{"state": "PROPOSED", "actor": actor, "at": now_iso()}],
-    }
-    await db.db.payments.insert_one(doc)
-    await audit("PAYMENT", payment_id, "PROPOSED", actor,
-                details={"amount": total, "invoices": invoice_ids})
-    return doc
+async def create_payment_proposal(payload: dict, actor: dict,
+                                  idempotency_key: Optional[str] = None) -> dict:
+    """AP payment proposal for approved invoices (optionally filtered by due).
+
+    Each invoice is claimed atomically (APPROVED → SCHEDULED) so two concurrent
+    proposals can never both include the same invoice — the second claimer
+    fails the conditional update and the whole proposal aborts (double-payment
+    protection). If the proposal insert then fails, the claims are released.
+    """
+    async with idempotent("PAY_PROP", idempotency_key) as gate:
+        if not gate["first_time"]:
+            return gate["result"]
+        invoice_ids = payload.get("invoice_ids")
+        if not invoice_ids:
+            rows = [_clean(dict(r)) async for r in db.db.supplier_invoices.find({
+                "status": "APPROVED"})]
+            invoice_ids = [r["invoice_id"] for r in rows]
+        lines = []
+        total = 0.0
+        claimed: list[str] = []
+        try:
+            for iid in invoice_ids:
+                inv = await _get_inv(iid)
+                if inv["status"] != "APPROVED":
+                    raise ConflictError(f"Invoice {iid} not APPROVED")
+                # atomic claim: only one concurrent proposal can flip each
+                # invoice out of APPROVED (the status condition is evaluated
+                # atomically at update time; version guards against a released
+                # claim being re-claimed in between when present)
+                claim_q: dict = {"invoice_id": iid, "status": "APPROVED"}
+                if inv.get("version") is not None:
+                    claim_q["version"] = inv["version"]
+                res = await db.db.supplier_invoices.update_one(
+                    claim_q,
+                    {"$set": {"status": "SCHEDULED",
+                              "scheduled_for": "PENDING",
+                              "updated_at": now_iso()},
+                     "$inc": {"version": 1}})
+                if res.modified_count != 1:
+                    raise ConflictError(
+                        f"Invoice {iid} is already scheduled on another payment")
+                claimed.append(iid)
+                lines.append({"invoice_id": iid, "vendor_id": inv["vendor_id"],
+                              "amount": inv["total_amount"]})
+                total += inv["total_amount"]
+            payment_id = await _next_id("payment", "PAY")
+            for line in lines:  # backfill the payment reference on claims
+                await db.db.supplier_invoices.update_one(
+                    {"invoice_id": line["invoice_id"]},
+                    {"$set": {"scheduled_for": payment_id}})
+            doc = {
+                "payment_id": payment_id,
+                "type": "OUTGOING",
+                "lines": lines,
+                "amount": round(total, 2),
+                "currency": "INR",
+                "method": payload.get("method", "BANK_TRANSFER"),
+                "status": "PROPOSED",
+                "created_by": actor,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "version": 1,
+                "timeline": [{"state": "PROPOSED", "actor": actor,
+                              "at": now_iso()}],
+            }
+            await db.db.payments.insert_one(doc)
+        except Exception:
+            # release claims so the invoices return to the AP queue
+            if claimed:
+                await db.db.supplier_invoices.update_many(
+                    {"invoice_id": {"$in": claimed}, "status": "SCHEDULED"},
+                    {"$set": {"status": "APPROVED", "scheduled_for": None,
+                              "updated_at": now_iso()},
+                     "$inc": {"version": 1}})
+            raise
+        await audit("PAYMENT", payment_id, "PROPOSED", actor,
+                    details={"amount": total, "invoices": invoice_ids})
+        gate.store(doc)
+        return doc
 
 
 async def authorize_payment(payment_id: str, actor: dict) -> dict:
     """Payment authorization: over limit → Human Decision Queue + SoD."""
+    from app.core.rbac import enforce_sod
+
+    # SoD: whoever processed/matched the related invoice may not authorize the
+    # payment for it (invoice processor ≠ payment authorizer).
+    pay_pre = await db.db.payments.find_one({"payment_id": payment_id})
+    if not pay_pre:
+        raise NotFound(f"Payment {payment_id} not found")
+    for line in (pay_pre.get("lines") or []):
+        try:
+            await enforce_sod(actor, "AUTHORIZED", "SUPPLIER_INVOICE",
+                              line["invoice_id"])
+        except Exception as e:
+            await audit("PAYMENT", payment_id, "AUTHORIZATION_BLOCKED_SOD", actor,
+                        reason=str(e)[:200])
+            raise
     pay = await db.db.payments.find_one({"payment_id": payment_id})
     if not pay:
         raise NotFound(f"Payment {payment_id} not found")
@@ -486,32 +586,45 @@ async def execute_payment(payment_id: str, payload: dict, actor: dict,
 
 # --------------------------------------------------------------- AR & cash app
 async def apply_cash(payload: dict, actor: dict) -> dict:
-    """Customer payment received → cash application on invoices."""
+    """Customer payment received → cash application on invoices.
+
+    Over-application guard (BUG-1): a payment may never exceed the open
+    balance. Excess is left unapplied and reported (on-account credit).
+    """
     invoice_id = payload.get("invoice_id")
     amount = float(payload.get("amount") or 0)
+    if amount <= 0:
+        raise ValidationFailed("Cash amount must be positive")
     inv = await db.db.customer_invoices.find_one({"invoice_id": invoice_id})
     if not inv:
         raise NotFound(f"Customer invoice {invoice_id} not found")
     if inv["status"] not in ("ISSUED", "PARTIALLY_PAID"):
         raise ConflictError(f"Invoice not open: {inv['status']}")
-    balance = float(inv.get("balance_amount") or inv["total_amount"])
-    new_balance = round(balance - amount, 2)
+    balance = round(float(inv.get("balance_amount") or inv["total_amount"]), 2)
+    applied = min(amount, balance)
+    unapplied = round(amount - applied, 2)
+    new_balance = round(balance - applied, 2)
     status = "PAID" if new_balance <= 0 else "PARTIALLY_PAID"
     await db.db.customer_invoices.update_one(
         {"invoice_id": invoice_id},
-        {"$set": {"balance_amount": max(new_balance, 0), "status": status,
+        {"$set": {"balance_amount": new_balance, "status": status,
                   "updated_at": now_iso()},
-         "$push": {"cash_applications": {"amount": amount, "at": now_iso(),
+         "$push": {"cash_applications": {"amount": applied,
+                                         "at": now_iso(),
                                          "reference": payload.get("reference"),
                                          "by": actor}}})
     await post_gl("CASH", amount, 0, f"Cash received {invoice_id}",
                   "CUSTOMER_INVOICE", invoice_id)
-    await post_gl("ACCOUNTS_RECEIVABLE", 0, amount,
+    await post_gl("ACCOUNTS_RECEIVABLE", 0, applied,
                   f"AR settled {invoice_id}", "CUSTOMER_INVOICE", invoice_id)
+    if unapplied > 0:
+        await post_gl("CUSTOMER_DEPOSITS", 0, unapplied,
+                      f"Unapplied cash {invoice_id}", "CUSTOMER_INVOICE",
+                      invoice_id)
     await audit("CUSTOMER_INVOICE", invoice_id, f"CASH_APPLIED_{status}", actor,
-                details={"amount": amount})
-    return {"invoice_id": invoice_id, "balance": max(new_balance, 0),
-            "status": status}
+                details={"amount": applied, "unapplied": unapplied})
+    return {"invoice_id": invoice_id, "balance": new_balance, "status": status,
+            "applied": applied, "unapplied": unapplied}
 
 
 # ------------------------------------------------------------ reconciliation
@@ -595,6 +708,103 @@ async def write_off(payload: dict, actor: dict) -> dict:
                   "MOVEMENT", mv["movement_id"])
     await audit("WRITE_OFF", mv["movement_id"], "POSTED", actor, details=payload)
     return mv
+
+
+async def issue_debit_note(payload: dict, actor: dict) -> dict:
+    """Debit note issued against a supplier invoice (damages, price correction,
+    failed deliveries). Posts GL and optionally re-runs the match.
+
+    A debit note increases what we may recover from the supplier; it never
+    authorizes payment on its own.
+    """
+    inv = await _get_inv(payload["invoice_id"])
+    if inv["status"] not in ("MATCH_FAILED", "MATCHED", "DISPUTED"):
+        raise ConflictError(f"Invoice not debit-note-eligible: {inv['status']}")
+    amount = round(float(payload.get("amount") or 0), 2)
+    if amount <= 0:
+        raise ValidationFailed("Debit note amount must be positive")
+    note_id = await _next_id("debit_note", "DN")
+    doc = {
+        "note_id": note_id,
+        "invoice_id": inv["invoice_id"],
+        "vendor_id": inv["vendor_id"],
+        "po_id": inv.get("po_id"),
+        "type": "DEBIT",
+        "amount": amount,
+        "reason": payload.get("reason", "SUPPLIER_DEBIT"),
+        "created_at": now_iso(),
+        "created_by": actor,
+    }
+    await db.db.credit_notes.insert_one(doc)  # same notes collection, typed
+    await post_gl("ACCOUNTS_PAYABLE", amount, 0,
+                  f"Debit note {note_id} {inv['invoice_id']}", "DEBIT_NOTE",
+                  note_id)
+    await post_gl("SUPPLIER_RECOVERIES", 0, amount,
+                  f"Debit note {note_id}", "DEBIT_NOTE", note_id)
+    await bus.publish("debit_note.issued",
+                      {"note_id": note_id, "invoice_id": inv["invoice_id"],
+                       "amount": amount}, actor)
+    await audit("DEBIT_NOTE", note_id, "ISSUED", actor,
+                details={"invoice": inv["invoice_id"], "amount": amount})
+    return doc
+
+
+async def ar_aging() -> dict:
+    """Accounts-receivable aging buckets from open customer invoices."""
+    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+    per_customer: Dict[str, float] = {}
+    open_total = 0.0
+    today = datetime.now(timezone.utc).date()
+    async for inv in db.db.customer_invoices.find(
+            {"status": {"$in": ["ISSUED", "PARTIALLY_PAID"]}}):
+        open_amt = float(inv.get("balance_amount") or inv["total_amount"])
+        due = inv.get("due_date")
+        days = 0
+        if due:
+            try:
+                days = max(0, (today -
+                               datetime.strptime(str(due)[:10], "%Y-%m-%d").date()).days)
+            except ValueError:
+                days = 0
+        key = "0-30" if days <= 30 else "31-60" if days <= 60 else \
+            "61-90" if days <= 90 else "90+"
+        buckets[key] = round(buckets[key] + open_amt, 2)
+        per_customer[inv.get("customer_id", "UNKNOWN")] = round(
+            per_customer.get(inv.get("customer_id", "UNKNOWN"), 0) + open_amt, 2)
+        open_total += open_amt
+    overdue = [c for c, v in per_customer.items() if v > 0]
+    return {"buckets": buckets, "open_total": round(open_total, 2),
+            "customers": sorted(per_customer.items(), key=lambda x: -x[1])[:25],
+            "open_customer_count": len(overdue),
+            "generated_at": now_iso()}
+
+
+async def collection_reminders(actor: dict) -> dict:
+    """Agent-driven dunning: reminders per overdue customer bucket (simulated
+    email dispatch + audit). Humans act only when a customer disputes."""
+    aging = await ar_aging()
+    from app.core.notifications import notify
+
+    sent = []
+    for customer_id, open_amt in aging["customers"]:
+        # resolve the harshest bucket containing this customer's amount
+        bucket = "0-30"
+        for k in ("90+", "61-90", "31-60"):
+            if aging["buckets"][k] > 0:
+                bucket = k
+                break
+        note_id = await notify(
+            "COLLECTION_REMINDER",
+            f"Payment reminder — balance {open_amt:,.2f}",
+            f"Outstanding balance {open_amt:,.2f} is in the {bucket} day bucket. "
+            f"Please remit or raise a dispute through the portal.",
+            [f"{customer_id.lower()}@example.com"],
+            "CUSTOMER", customer_id)
+        sent.append({"customer_id": customer_id, "amount": open_amt,
+                     "bucket": bucket, "notification_id": note_id})
+    await audit("AR_COLLECTIONS", "aging", "REMINDERS_SENT", actor,
+                details={"customers": len(sent)})
+    return {"sent": sent, "count": len(sent), "aging": aging["buckets"]}
 
 
 async def _get_inv(invoice_id: str) -> dict:

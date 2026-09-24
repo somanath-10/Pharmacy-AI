@@ -1,7 +1,7 @@
 """Masters routes."""
-from typing import List, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Query
 
 from app.core.security import get_current_principal
 from app.domains import masters as masters_svc
@@ -49,6 +49,11 @@ async def create_customer(payload: dict = Body(...),
     return await masters_svc.create_customer(payload)
 
 
+@router.get("/equipment/due-report")
+async def equipment_due_report(principal: dict = Depends(get_current_principal)):
+    return await masters_svc.equipment_due_report()
+
+
 @router.get("/equipment")
 async def list_equipment(principal: dict = Depends(get_current_principal)):
     rows = []
@@ -83,6 +88,14 @@ async def create_specification(payload: dict = Body(...),
     return await masters_svc.create_specification(payload)
 
 
+@router.post("/specifications/{product_id}/versions/{version}/approve")
+async def approve_specification(product_id: str, version: int,
+                                payload: dict = Body(default={}),
+                                principal: dict = Depends(get_current_principal)):
+    return await masters_svc.approve_specification(product_id, version, principal,
+                                                   payload.get("notes", ""))
+
+
 @router.get("/boms")
 async def list_boms(principal: dict = Depends(get_current_principal)):
     rows = []
@@ -104,3 +117,32 @@ async def create_bom(payload: dict = Body(...),
 async def upsert_price(payload: dict = Body(...),
                        principal: dict = Depends(get_current_principal)):
     return await masters_svc.upsert_price(payload)
+
+
+# ------------------------------------------- equipment ops (Parts 16 & 18)
+@router.post("/equipment/{code}/calibrate")
+async def calibrate_equipment(code: str, payload: dict = Body(...),
+                              principal: dict = Depends(get_current_principal)):
+    return await masters_svc.calibrate_equipment(code, payload, principal)
+
+
+@router.post("/equipment/{code}/maintenance")
+async def maintenance_equipment(code: str, payload: dict = Body(...),
+                                principal: dict = Depends(get_current_principal)):
+    return await masters_svc.maintenance_equipment(code, payload, principal)
+
+
+@router.post("/equipment/{code}/hold")
+async def hold_equipment(code: str, payload: dict = Body(...),
+                         principal: dict = Depends(get_current_principal)):
+    return await masters_svc.hold_equipment(code, payload.get("reason", "HOLD"),
+                                            principal)
+
+
+@router.post("/equipment/{code}/use")
+async def use_equipment(code: str, payload: dict = Body(...),
+                        principal: dict = Depends(get_current_principal)):
+    return await masters_svc.use_equipment(code, payload.get("purpose", ""),
+                                           principal)
+
+

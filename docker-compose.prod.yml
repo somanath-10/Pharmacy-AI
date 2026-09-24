@@ -1,0 +1,54 @@
+# Production overrides: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# NOTE: the API uses MongoDB transactions, so production mongo runs as a
+# single-node replica set (rs0). The one-shot `mongo-init` service below
+# initiates the replica set once; the API's own healthcheck/wait handles the
+# rest. JWT_SECRET must be provided via the environment/.env and must be at
+# least 32 bytes — the backend refuses to boot in production with a weak one.
+services:
+  mongo:
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: []           # never expose mongo publicly in production
+    restart: always
+
+  # One-shot replica-set initiation (transactions require a primary).
+  mongo-init:
+    image: mongo:7
+    restart: "no"
+    depends_on:
+      mongo:
+        condition: service_started
+    entrypoint: >
+      bash -c '
+        for i in $$(seq 1 30); do
+          mongosh --host mongo --quiet --eval "db.adminCommand(\"ping\").ok" >/dev/null 2>&1 && break
+          sleep 2
+        done
+        mongosh --host mongo --quiet --eval "
+          try { rs.status().ok } catch (e) {
+            rs.initiate({_id: \"rs0\", members: [{_id: 0, host: \"mongo:27017\"}]})
+          }" || true'
+
+  redis:
+    ports: []
+    restart: always
+
+  api:
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      ENV: production
+      SEED_DEMO: "0"    # never auto-seed demo data in production
+      MONGODB_URI: mongodb://mongo:27017/?replicaSet=rs0
+    ports: []
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  web:
+    ports:
+      - "80:80"
+    restart: always

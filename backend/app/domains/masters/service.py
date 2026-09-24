@@ -1,7 +1,7 @@
 """Masters domain: warehouses, products, customers, equipment, specifications, BOMs."""
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
+from app.core.audit import audit
 from app.core.database import db, now_iso
 from app.core.errors import NotFound, ValidationFailed
 
@@ -174,17 +174,126 @@ async def create_equipment(payload: dict) -> dict:
 
 
 def equipment_ready(equipment: dict) -> Tuple[bool, List[str]]:
-    """GMP gate used before batch start."""
+    """GMP gate used before batch start, QC testing and equipment use (Part 16).
+
+    Deterministic: date-based checks win over stale label flags — a record
+    marked VALID but past its due date is still blocked."""
+    today = now_iso()[:10]
     blockers = []
     if equipment.get("calibration_status") != "VALID":
         blockers.append(f"calibration_status={equipment.get('calibration_status')}")
+    cal_due = equipment.get("calibration_due")
+    if cal_due and str(cal_due)[:10] <= today:
+        blockers.append(f"calibration_due={str(cal_due)[:10]} (expired)")
     if equipment.get("maintenance_status") == "OVERDUE":
         blockers.append("maintenance_status=OVERDUE")
+    maint_due = equipment.get("maintenance_due")
+    if maint_due and str(maint_due)[:10] <= today:
+        blockers.append(f"maintenance_due={str(maint_due)[:10]} (overdue)")
     if equipment.get("cleaning_status") != "VALID":
         blockers.append(f"cleaning_status={equipment.get('cleaning_status')}")
+    qual = equipment.get("qualification_status")
+    if qual in ("PENDING", "FAILED", "EXPIRED"):
+        blockers.append(f"qualification_status={qual}")
+    elif qual is None:
+        # legacy equipment without qualification_status field: treat as qualified
+        pass
+    if equipment.get("on_hold"):
+        blockers.append("equipment on HOLD")
     if equipment.get("status") != "RELEASED":
         blockers.append(f"status={equipment.get('status')}")
     return (len(blockers) == 0, blockers)
+
+
+async def get_equipment(code: str) -> Optional[dict]:
+    """Equipment lookup by code; None when unknown."""
+    return await db.db.equipment.find_one({"code": code})
+
+
+async def require_equipment_ready(code: str) -> dict:
+    """Gate for QC result entry / production / any equipment use: raises when
+    the instrument is not fit for use. Deterministic and centralized."""
+    eq = await db.db.equipment.find_one({"code": code})
+    if not eq:
+        raise NotFound(f"Equipment {code} not found")
+    ok, blockers = equipment_ready(eq)
+    if not ok:
+        raise ValidationFailed(
+            f"Equipment {code} not usable: " + "; ".join(blockers))
+    return eq
+
+
+async def calibrate_equipment(code: str, payload: dict, actor: dict) -> dict:
+    """Record calibration; extends the due date deterministically and clears
+    the calibration blocker."""
+    eq = await db.db.equipment.find_one({"code": code})
+    if not eq:
+        raise NotFound(f"Equipment {code} not found")
+    due = payload.get("next_due")
+    if not due:
+        raise ValidationFailed("calibration needs next_due date")
+    if str(due)[:10] <= now_iso()[:10]:
+        raise ValidationFailed("next_due must be in the future")
+    await db.db.equipment.update_one(
+        {"code": code},
+        {"$set": {"calibration_status": "VALID", "calibration_due": str(due)[:10],
+                  "last_calibrated_at": now_iso(), "updated_at": now_iso()},
+         "$push": {"logs": {"event": "CALIBRATION", "result": payload.get("result", "PASS"),
+                            "certificate": payload.get("certificate_ref"),
+                            "actor": actor, "at": now_iso()}}})
+    await audit("EQUIPMENT", code, "CALIBRATED", actor,
+                details={"next_due": str(due)[:10]})
+    return await db.db.equipment.find_one({"code": code})
+
+
+async def maintenance_equipment(code: str, payload: dict, actor: dict) -> dict:
+    """Preventive/breakdown maintenance completion: clears OVERDUE + optional
+    hold, sets the next maintenance due date."""
+    eq = await db.db.equipment.find_one({"code": code})
+    if not eq:
+        raise NotFound(f"Equipment {code} not found")
+    due = payload.get("next_due")
+    if not due or str(due)[:10] <= now_iso()[:10]:
+        raise ValidationFailed("maintenance needs a future next_due date")
+    update = {"maintenance_status": "OK", "maintenance_due": str(due)[:10],
+              "last_maintenance_at": now_iso(), "updated_at": now_iso()}
+    if payload.get("back_to_service", True):
+        update["status"] = "RELEASED"
+        update["on_hold"] = False
+    await db.db.equipment.update_one(
+        {"code": code},
+        {"$set": update,
+         "$push": {"logs": {"event": payload.get("kind", "PREVENTIVE_MAINTENANCE"),
+                            "notes": payload.get("notes", ""),
+                            "actor": actor, "at": now_iso()}}})
+    await audit("EQUIPMENT", code, "MAINTENANCE_DONE", actor,
+                details={"next_due": str(due)[:10]})
+    return await db.db.equipment.find_one({"code": code})
+
+
+async def hold_equipment(code: str, reason: str, actor: dict) -> dict:
+    """Place equipment on hold (breakdown, suspicion of fault): immediately
+    unusable by the deterministic gate."""
+    res = await db.db.equipment.update_one(
+        {"code": code},
+        {"$set": {"on_hold": True, "status": "UNDER_MAINTENANCE",
+                  "updated_at": now_iso()},
+         "$push": {"logs": {"event": "HOLD", "reason": reason,
+                            "actor": actor, "at": now_iso()}}})
+    if res.matched_count == 0:
+        raise NotFound(f"Equipment {code} not found")
+    await audit("EQUIPMENT", code, "HOLD", actor, reason=reason)
+    return await db.db.equipment.find_one({"code": code})
+
+
+async def use_equipment(code: str, purpose: str, actor: dict) -> dict:
+    """Usage log with the deterministic gate — no use without passing it."""
+    eq = await require_equipment_ready(code)
+    await db.db.equipment.update_one(
+        {"code": code},
+        {"$push": {"logs": {"event": "USAGE", "purpose": purpose,
+                            "actor": actor, "at": now_iso()}}})
+    return {"equipment": eq["code"], "usage_logged": True, "purpose": purpose}
 
 
 async def log_equipment_event(code: str, event: str, payload: dict, actor: dict):
@@ -198,11 +307,43 @@ async def log_equipment_event(code: str, event: str, payload: dict, actor: dict)
         raise NotFound(f"Equipment {code} not found")
 
 
+async def equipment_due_report() -> dict:
+    """Calibration/maintenance due report for dashboards + agent monitoring."""
+    today = now_iso()[:10]
+    horizon = await _cal_horizon()
+    soon_cut = _shift_date(today, horizon)
+    out = {"calibration_due": [], "maintenance_due": [], "expired": []}
+    async for e in db.db.equipment.find({"status": {"$ne": "DECOMMISSIONED"}}):
+        cal = str(e.get("calibration_due") or "")[:10]
+        mnt = str(e.get("maintenance_due") or "")[:10]
+        if cal and today < cal <= soon_cut:
+            out["calibration_due"].append({"code": e["code"], "due": cal})
+        if mnt and today < mnt <= soon_cut:
+            out["maintenance_due"].append({"code": e["code"], "due": mnt})
+        blocked = equipment_ready(e)[1]
+        if blocked:
+            out["expired"].append({"code": e["code"], "blockers": blocked})
+    return out
+
+
+def _shift_date(day: str, days: int) -> str:
+    from datetime import datetime, timedelta
+    return (datetime.fromisoformat(day) + timedelta(days=days)).isoformat()[:10]
+
+
+async def _cal_horizon() -> int:
+    from app.core.config import settings
+    return int(getattr(settings, "equipment_due_warn_days", 30))
+
+
 # ------------------------------------------------------------- specifications
 TEST_NAMES = ["description", "identification", "assay", "impurities", "dissolution",
               "uniformity", "microbiology", "ph", "moisture"]
 
 async def create_specification(payload: dict) -> dict:
+    """Create a specification. Quality-critical materials enter DRAFT and need
+    QA approval before they are usable (GAP-11); callers may pass
+    status=APPROVED only for non-controlled items via approve_specification."""
     required = ["product_id", "version", "tests"]
     missing = [k for k in required if not payload.get(k)]
     if missing:
@@ -217,18 +358,49 @@ async def create_specification(payload: dict) -> dict:
     )
     if existing:
         raise ValidationFailed(f"Specification version {payload['version']} exists")
+    # quality-critical (controlled / prescription) materials: draft → QA approval
+    prod = await db.db.products.find_one({"sku": payload["product_id"]})
+    quality_critical = bool(prod and (prod.get("is_prescription")
+                                      or prod.get("is_controlled")))
+    initial = "DRAFT" if quality_critical else payload.get("status", "APPROVED")
     doc = {
         "product_id": payload["product_id"],
         "version": payload["version"],
         "tests": payload["tests"],
         "sampling_plan": payload.get("sampling_plan", {"n": 3, "method": "SQRT_N_1"}),
         "effective_from": payload.get("effective_from", now_iso()),
-        "status": payload.get("status", "APPROVED"),
-        "approved_by": payload.get("approved_by"),
+        "status": initial,
+        "approved_by": None,
         "created_at": now_iso(),
     }
     await db.db.specifications.insert_one(doc)
     return _clean(doc)
+
+
+async def approve_specification(product_id: str, version: int, actor: dict,
+                                notes: str = "") -> dict:
+    """QA authority approves a DRAFT specification (GAP-11)."""
+    from app.core.rbac import QA_AUTHORITY_ROLES
+
+    if actor.get("type") == "USER" and "SUPER_ADMIN" not in actor.get("roles", []) \
+            and not (set(actor.get("roles", [])) & QA_AUTHORITY_ROLES):
+        from app.core.errors import PermissionDenied
+
+        raise PermissionDenied("Specification approval requires QA authority")
+    doc = await db.db.specifications.find_one(
+        {"product_id": product_id, "version": version})
+    if not doc:
+        raise NotFound(f"Specification {product_id} v{version} not found")
+    if doc["status"] == "APPROVED":
+        return _clean(doc)
+    if doc["status"] != "DRAFT":
+        raise ValidationFailed(f"Specification not DRAFT: {doc['status']}")
+    await db.db.specifications.update_one(
+        {"product_id": product_id, "version": version},
+        {"$set": {"status": "APPROVED", "approved_by": actor,
+                  "approval_notes": notes, "approved_at": now_iso()}})
+    return _clean(await db.db.specifications.find_one(
+        {"product_id": product_id, "version": version}))
 
 
 async def get_active_specification(product_id: str) -> dict:

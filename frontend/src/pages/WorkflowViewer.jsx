@@ -2,11 +2,17 @@ import React, { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Topbar } from "../App";
-import { When } from "../ui";
+import { When, Timeline, Field } from "../ui";
 
 const PRESETS = [
-  ["PURCHASE_ORDER", "PO"], ["SALES_ORDER", "SO"], ["PRODUCTION_ORDER", "MPO"],
-  ["SUPPLIER_INVOICE", "AP"], ["GRN", "GRN"], ["VENDOR", "VDR"],
+  ["PURCHASE_ORDER", "PO"], ["PURCHASE_REQUISITION", "PR"], ["SALES_ORDER", "SO"],
+  ["PRODUCTION_ORDER", "MPO"], ["SUPPLIER_INVOICE", "AP"], ["CUSTOMER_INVOICE", "AR"],
+  ["GRN", "GRN"], ["VENDOR", "VDR"], ["SHIPMENT", "SHP"],
+  ["PRESCRIPTION", "RX"], ["QC_SAMPLE", "QC"], ["RETURN_REQUEST", "RTN"],
+  ["RECALL", "RCL"], ["SAFETY_CASE", "PV"], ["COMPLAINT", "CMP"],
+  ["PAYMENT", "PAY"], ["SOURCING_EVENT", "RFQ"], ["QUOTATION", "QT"],
+  ["CAPA", "CAPA"], ["DEVIATION", "DEV"], ["CHANGE_REQUEST", "CHG"],
+  ["AUCTION", "AUC"], ["RAW_MATERIAL_BATCH", "RMB"],
 ];
 
 export default function WorkflowViewer() {
@@ -29,35 +35,32 @@ export default function WorkflowViewer() {
 
   const nodes = data?.nodes || [];
   const audit = data?.audit || [];
-  const stateSet = {};
-  nodes.forEach((n) => { stateSet[n.node] = n.status; });
 
   return (
     <div>
       <Topbar title="Workflow Viewer"
               sub="Every entity exposes its full lifecycle — agent/user, timestamps, reasons and audit records" />
-      <div className="card mb">
-        <div className="row" style={{ flexWrap: "wrap" }}>
-          <div className="field" style={{ marginBottom: 0, minWidth: 210 }}>
-            <label>Entity type</label>
-            <select value={etype} onChange={(e) => setEtype(e.target.value)}>
-              {PRESETS.map(([t]) => <option key={t} value={t}>{t}</option>)}
-            </select>
+
+      <div className="card mb rise">
+        <div className="row wrap" style={{ alignItems: "flex-end" }}>
+          <div style={{ minWidth: 220 }}>
+            <Field label="Entity type">
+              <select value={etype} onChange={(e) => setEtype(e.target.value)}>
+                {PRESETS.map(([t]) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
           </div>
-          <div className="field" style={{ marginBottom: 0, minWidth: 180 }}>
-            <label>Entity ID</label>
-            <input value={eid} onChange={(e) => setEid(e.target.value)}
-                   placeholder="e.g. PO-00001" className="mono" />
+          <div style={{ minWidth: 180 }}>
+            <Field label="Entity ID">
+              <input value={eid} onChange={(e) => setEid(e.target.value)}
+                     placeholder="e.g. PO-00001" className="mono" />
+            </Field>
           </div>
-          {PRESETS.filter(([, p]) => p === etype.slice(0, 2) || true).slice(0, 0)}
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>&nbsp;</label>
-            <button className="btn primary" onClick={load} disabled={!eid || busy}>
-              {busy ? "Loading…" : "Trace workflow"}
-            </button>
-          </div>
+          <button className="btn primary" style={{ marginBottom: 14 }} onClick={load} disabled={!eid || busy}>
+            {busy ? <span className="spin" /> : "🔍"} Trace workflow
+          </button>
           <div className="spacer" />
-          <div className="small muted" style={{ alignSelf: "end" }}>
+          <div className="small muted" style={{ paddingBottom: 18 }}>
             Try: PO-00001 · SO-00001 · MPO-00001 · AP-00001
           </div>
         </div>
@@ -67,9 +70,9 @@ export default function WorkflowViewer() {
 
       {data && (
         <>
-          <div className="card mb">
+          <div className="card mb rise d1">
             <h3>{etype} {eid} — lifecycle</h3>
-            <div className="card-sub">Green = done · Blue = in progress · Grey = pending</div>
+            <div className="card-sub">Green = done · Blue = current · Grey = pending · next legal steps: {(data.allowed_next || []).join(", ") || "—"}</div>
             {nodes.length === 0 ? (
               <div className="empty">No workflow nodes recorded for this entity yet.</div>
             ) : (
@@ -89,29 +92,18 @@ export default function WorkflowViewer() {
             )}
           </div>
 
-          <div className="card">
+          <div className="card rise d2">
             <h3>Audit trail ({audit.length} events)</h3>
             <div className="card-sub">Append-only — every state change, actor and reason</div>
             {audit.length === 0 ? (
               <div className="empty">No audit events.</div>
             ) : (
-              <table className="table">
-                <thead><tr>
-                  <th>When</th><th>Action</th><th>Actor</th>
-                  <th>Previous → New</th><th>Reason / Policy</th>
-                </tr></thead>
-                <tbody>
-                  {audit.map((a, i) => (
-                    <tr key={i}>
-                      <td className="small">{When(a.timestamp)}</td>
-                      <td><span className="badge blue">{a.action?.replace(/_/g, " ")}</span></td>
-                      <td className="small mono">{a.actor?.type === "AGENT" ? "🤖" : "👤"} {a.actor?.id}</td>
-                      <td className="small mono">{a.previous_state || "—"} → {a.new_state || "—"}</td>
-                      <td className="small">{a.reason || a.details?.reason || a.policy || ""}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <Timeline items={audit.map((a) => ({
+                title: `${a.action?.replace(/_/g, " ")} — ${a.actor?.type === "AGENT" ? "🤖" : "👤"} ${a.actor?.id || "system"}`,
+                detail: `${a.previous_state || "—"} → ${a.new_state || "—"}${a.reason ? ` · ${a.reason}` : a.details?.reason ? ` · ${a.details.reason}` : ""}`,
+                meta: `${When(a.timestamp)}${a.correlation_id ? ` · corr ${a.correlation_id}` : ""}`,
+                tone: a.action === "REJECTED" ? "red" : a.action === "APPROVED" ? "green" : "",
+              }))} />
             )}
           </div>
         </>

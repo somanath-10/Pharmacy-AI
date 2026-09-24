@@ -7,7 +7,7 @@ import asyncio
 import sys
 
 from app.core.config import settings
-from app.core.database import db
+from app.core.database import db, now_iso
 from app.core.security import hash_password
 
 ROLES_USERS = [
@@ -73,7 +73,7 @@ async def _seed_users():
             "user_id": uid, "email": email, "name": name, "roles": roles,
             "vendor_id": vendor_id,
             "password_hash": hash_password(password),
-            "created_at": __import__("app.core.database", fromlist=["now_iso"]).now_iso(),
+            "created_at": now_iso(),
         })
 
 
@@ -84,7 +84,7 @@ async def _next(name, prefix):
 
 
 async def _seed_masters():
-    now = __import__("app.core.database", fromlist=["now_iso"]).now_iso()
+    now = now_iso()
 
     # Site & warehouses
     if not await db.db.warehouses.find_one({"code": "WH-MAIN"}):
@@ -193,6 +193,7 @@ async def _seed_masters():
             "code": code, "name": name, "site_id": "SITE-001",
             "calibration_status": "VALID", "maintenance_status": "OK",
             "cleaning_status": "VALID", "status": "RELEASED",
+            "qualification_status": "QUALIFIED",
             "logs": [], "created_at": now})
     # one equipment intentionally out-of-calibration for the gate test path
     if not await db.db.equipment.find_one({"code": "EQ-GRAN-02"}):
@@ -200,7 +201,8 @@ async def _seed_masters():
             "code": "EQ-GRAN-02", "name": "Legacy Granulator (calibration overdue)",
             "site_id": "SITE-001", "calibration_status": "EXPIRED",
             "maintenance_status": "OK", "cleaning_status": "VALID",
-            "status": "RELEASED", "logs": [], "created_at": now})
+            "status": "RELEASED", "qualification_status": "QUALIFIED",
+            "logs": [], "created_at": now})
 
     # Specifications + BOM for Paracetamol finished good
     fg = await db.db.products.find_one(

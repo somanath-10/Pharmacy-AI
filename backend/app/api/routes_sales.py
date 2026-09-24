@@ -30,6 +30,45 @@ async def score_lead(lead_id: str,
     return await crm_svc.score_lead(lead_id, principal)
 
 
+@crm_router.post("/leads/import")
+async def import_leads_csv(payload: dict = Body(...),
+                           principal: dict = Depends(get_current_principal)):
+    """Bulk lead import: JSON {csv: "...", campaign_id?} (≤500 rows, deduped)."""
+    return await crm_svc.import_leads_csv(payload.get("csv", ""), principal,
+                                          payload.get("campaign_id"))
+
+
+@crm_router.post("/campaigns")
+async def create_campaign(payload: dict = Body(...),
+                          principal: dict = Depends(get_current_principal)):
+    return await crm_svc.create_campaign(payload, principal)
+
+
+@crm_router.get("/campaigns")
+async def list_campaigns(status: Optional[str] = Query(None),
+                         principal: dict = Depends(get_current_principal)):
+    return await crm_svc.list_campaigns(status)
+
+
+@crm_router.post("/campaigns/{campaign_id}/submit")
+async def submit_campaign(campaign_id: str,
+                          principal: dict = Depends(get_current_principal)):
+    return await crm_svc.submit_campaign(campaign_id, principal)
+
+
+@crm_router.post("/campaigns/{campaign_id}/decide")
+async def decide_campaign(campaign_id: str, payload: dict = Body(...),
+                          principal: dict = Depends(get_current_principal)):
+    return await crm_svc.decide_campaign(campaign_id, payload["decision"],
+                                         principal, payload.get("reason", ""))
+
+
+@crm_router.post("/campaigns/{campaign_id}/activate")
+async def activate_campaign(campaign_id: str,
+                            principal: dict = Depends(get_current_principal)):
+    return await crm_svc.activate_campaign(campaign_id, principal)
+
+
 @crm_router.post("/leads/{lead_id}/convert")
 async def convert_lead(lead_id: str,
                        principal: dict = Depends(get_current_principal)):
@@ -155,3 +194,51 @@ async def pos_sale(payload: dict = Body(...),
                    principal: dict = Depends(get_current_principal)):
     idem = payload.pop("idempotency_key", None)
     return await sales_svc.pos_sale(payload, principal, idem)
+
+
+# ==================================================================
+# Phase: OMS + CRM completion routes.
+# ==================================================================
+@sales_router.post("/orders/{order_id}/allocate-partial")
+async def allocate_partial(order_id: str,
+                           principal: dict = Depends(get_current_principal)):
+    return await sales_svc.allocate_order_partial(order_id, principal)
+
+
+@sales_router.post("/orders/{order_id}/fulfill")
+async def record_fulfillment(order_id: str, payload: dict = Body(...),
+                             principal: dict = Depends(get_current_principal)):
+    return await sales_svc.record_fulfillment(order_id, payload, principal)
+
+
+@sales_router.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, payload: dict = Body(...),
+                       principal: dict = Depends(get_current_principal)):
+    return await sales_svc.cancel_order(order_id,
+                                        payload.get("reason", "Customer request"),
+                                        principal)
+
+
+@sales_router.post("/inquiries/{inq_id}/quote")
+async def quote_from_rfq(inq_id: str, payload: dict = Body(default={}),
+                         principal: dict = Depends(get_current_principal)):
+    return await sales_svc.quotation_from_rfq(
+        inq_id, principal, float(payload.get("discount_pct", 0)))
+
+
+@crm_router.post("/opportunities/{opp_id}/rfq")
+async def opp_rfq(opp_id: str, payload: dict = Body(...),
+                  principal: dict = Depends(get_current_principal)):
+    return await crm_svc.create_opportunity_rfq(opp_id, payload, principal)
+
+
+@crm_router.post("/opportunities/{opp_id}/close")
+async def opp_close(opp_id: str, payload: dict = Body(...),
+                    principal: dict = Depends(get_current_principal)):
+    return await crm_svc.convert_opportunity(opp_id, payload, principal)
+
+
+@crm_router.get("/customers/{customer_id}/360")
+async def customer_360(customer_id: str,
+                       principal: dict = Depends(get_current_principal)):
+    return await crm_svc.customer_360(customer_id)

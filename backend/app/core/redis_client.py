@@ -1,10 +1,13 @@
 """Redis client with in-process fallback (cache, locks, rate-limit counters)."""
 import asyncio
 import json
+import logging
 import time
 from typing import Any, Optional
 
 from app.core.config import settings
+
+log = logging.getLogger("pharmaos.redis")
 
 
 class MemoryCache:
@@ -63,6 +66,7 @@ class CacheClient:
                 )
                 await self._redis.ping()
             except Exception:
+                log.warning("Redis connection failed, using memory fallback", exc_info=True)
                 self._redis = None
 
     @property
@@ -74,6 +78,7 @@ class CacheClient:
             try:
                 return await self._redis.get(key)
             except Exception:
+                log.warning("Redis get failed for %s, falling back to memory", key, exc_info=True)
                 return await self._memory.get(key)
         return await self._memory.get(key)
 
@@ -83,7 +88,7 @@ class CacheClient:
                 await self._redis.set(key, value, ex=ttl)
                 return
             except Exception:
-                pass
+                log.warning("Redis set failed for %s, falling back to memory", key, exc_info=True)
         await self._memory.set(key, value, ttl)
 
     async def delete(self, key: str):
@@ -92,7 +97,7 @@ class CacheClient:
                 await self._redis.delete(key)
                 return
             except Exception:
-                pass
+                log.warning("Redis delete failed for %s, falling back to memory", key, exc_info=True)
         await self._memory.delete(key)
 
     async def get_json(self, key: str) -> Optional[Any]:
@@ -101,6 +106,7 @@ class CacheClient:
             try:
                 return json.loads(raw)
             except Exception:
+                log.warning("JSON decode failed for key %s", key, exc_info=True)
                 return None
         return None
 
@@ -112,7 +118,7 @@ class CacheClient:
             try:
                 return bool(await self._redis.set(f"lock:{name}", "1", nx=True, ex=ttl))
             except Exception:
-                pass
+                log.warning("Redis acquire_lock failed for %s, falling back to memory", name, exc_info=True)
         return await self._memory.acquire_lock(name, ttl)
 
     async def release_lock(self, name: str):
@@ -121,7 +127,7 @@ class CacheClient:
                 await self._redis.delete(f"lock:{name}")
                 return
             except Exception:
-                pass
+                log.warning("Redis release_lock failed for %s, falling back to memory", name, exc_info=True)
         await self._memory.release_lock(name)
 
     async def incr_window(self, key: str, ttl: int = 60) -> int:

@@ -1,6 +1,5 @@
 """Pharmacy: prescription intake (Document AI), compliance rules, pharmacist
 review (authority), dispensing, controlled-substance registers."""
-from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from app.core.audit import audit
@@ -198,6 +197,13 @@ async def dispense(payload: dict, actor: dict,
         rx = await _get(rx_id)
         if rx["status"] != "APPROVED":
             raise ConflictError(f"Prescription not APPROVED: {rx['status']}")
+        # duplicate-dispense prevention: a dispensed Rx can never dispense again
+        # (the state machine already blocks it — belt-and-braces ledger check)
+        prior = await db.db.dispenses.find_one({"rx_id": rx_id})
+        if prior:
+            raise ConflictError(
+                f"Duplicate dispense blocked: Rx {rx_id} already dispensed "
+                f"as {prior.get('dispense_id')}")
         from app.core.rbac import PHARMACIST_AUTHORITY_ROLES
 
         if actor.get("type") == "USER" and "SUPER_ADMIN" not in actor.get("roles", []) \
@@ -208,17 +214,20 @@ async def dispense(payload: dict, actor: dict,
             if not m["matched"]:
                 raise ValidationFailed(f"Unmatched medicine: {m['raw']}")
             qty = float((m.get("raw") or {}).get("dispense_qty") or 1)
-            plan = await inventory.fefo_batches(m["product_id"],
-                                                payload.get("warehouse_id"), qty)
-            for p in plan:
-                mv = await inventory.record_movement(
-                    "DISPENSE", m["product_id"], p["warehouse_id"], p["allocate"],
-                    batch_id=p["batch_id"] if p["batch_id"] != "UNBATCHED" else None,
-                    reference_type="PRESCRIPTION", reference_id=rx_id,
-                    performed_by=actor)
+            _ = await inventory.fefo_batches(m["product_id"],
+                                             payload.get("warehouse_id"), qty)
+            # atomic reservation first (race-free), then consume it into a
+            # DISPENSE movement — never a direct AVAILABLE decrement (which
+            # would double-decrement with the reservation legs)
+            await inventory.reserve(m["product_id"], qty, "PRESCRIPTION",
+                                    rx_id, payload.get("warehouse_id"), actor)
+            mvs = await inventory.consume_reservation(
+                "PRESCRIPTION", rx_id, "DISPENSE",
+                payload.get("warehouse_id") or "WH-MAIN", actor=actor)
+            for mv in mvs:
                 lines.append({"sku": m["product_id"],
-                              "batch_id": p["batch_id"],
-                              "quantity": p["allocate"],
+                              "batch_id": mv["batch_id"],
+                              "quantity": mv["quantity"],
                               "movement_id": mv["movement_id"]})
         await transition("prescription", rx_id, "prescriptions", "rx_id",
                          "DISPENSED", actor, reason="Dispensed to patient")
@@ -267,3 +276,51 @@ async def list_prescriptions(status: Optional[str] = None) -> List[dict]:
     q = {} if not status else {"status": status}
     return [_clean(dict(r)) async for r in
             db.db.prescriptions.find(q).sort("created_at", -1).limit(200)]
+
+
+# ==================================================================
+# Phase: Pharmacy completion — duplicate-dispense prevention,
+# prescription & dispense history.
+# ==================================================================
+async def dispense_history(rx_id: str = None, patient: str = None,
+                           limit: int = 100) -> list:
+    """Dispense history filterable by rx or patient (audited reads)."""
+    q = {}
+    if rx_id:
+        q["rx_id"] = rx_id
+    if patient:
+        q["patient"] = {"$regex": patient, "$options": "i"}
+    out = []
+    async for d in db.db.dispenses.find(q).sort("dispensed_at", -1).limit(limit):
+        d.pop("_id", None)
+        out.append(d)
+    return out
+
+
+async def prescription_history(patient: str = None, status: str = None,
+                               limit: int = 100) -> list:
+    """Prescription history (per patient or status) for pharmacist review."""
+    q = {}
+    if patient:
+        q["patient"] = {"$regex": patient, "$options": "i"}
+    if status:
+        q["status"] = status
+    out = []
+    async for r in db.db.prescriptions.find(q).sort("created_at", -1).limit(limit):
+        r.pop("_id", None)
+        out.append(r)
+    return out
+
+
+async def controlled_register_history(from_date: str = None,
+                                      limit: int = 200) -> list:
+    """Schedule X register entries (statutory reporting view)."""
+    q = {}
+    if from_date:
+        q["created_at"] = {"$gte": from_date}
+    out = []
+    async for r in db.db.controlled_registers.find(q).sort(
+            "created_at", -1).limit(limit):
+        r.pop("_id", None)
+        out.append(r)
+    return out

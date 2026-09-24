@@ -26,6 +26,12 @@ class PermissionDenied(DomainError):
     code = "PERMISSION_DENIED"
 
 
+class SoDError(DomainError):
+    """Segregation-of-duties violation (Part 1)."""
+    status_code = 403
+    code = "SOD_VIOLATION"
+
+
 class WorkflowError(DomainError):
     status_code = 409
     code = "WORKFLOW_ERROR"

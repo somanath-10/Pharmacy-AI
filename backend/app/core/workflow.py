@@ -28,14 +28,16 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
     StateMachine(
         "vendor",
         {
-            "REGISTERED": ["UNDER_REVIEW", "RETIRED"],
+            "REGISTERED": ["UNDER_REVIEW", "DOCS_PENDING", "RETIRED"],
+            "DOCS_PENDING": ["UNDER_REVIEW", "BLOCKED", "RETIRED"],
             "UNDER_REVIEW": ["QA_QUALIFICATION", "COMMERCIAL_REVIEW", "APPROVED",
                              "BLOCKED"],
             "QA_QUALIFICATION": ["COMMERCIAL_REVIEW", "UNDER_REVIEW"],
-            "COMMERCIAL_REVIEW": ["APPROVED", "QA_QUALIFICATION", "UNDER_REVIEW"],
+            "COMMERCIAL_REVIEW": ["APPROVED", "QA_QUALIFICATION", "UNDER_REVIEW",
+                                  "BLOCKED"],
             "APPROVED": ["SUSPENDED", "BLOCKED", "RETIRED"],
-            "SUSPENDED": ["APPROVED", "BLOCKED", "BLACKLISTED"],
-            "BLOCKED": ["APPROVED", "BLACKLISTED"],
+            "SUSPENDED": ["APPROVED", "BLOCKED", "UNDER_REVIEW", "BLACKLISTED"],
+            "BLOCKED": ["APPROVED", "UNDER_REVIEW", "BLACKLISTED"],
             "BLACKLISTED": [],
             "RETIRED": [],
         },
@@ -214,7 +216,7 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
             "DISPUTED": ["IN_MATCHING", "WRITTEN_OFF", "CANCELLED"],
             "MATCHED": ["APPROVED"],
             "APPROVED": ["SCHEDULED"],
-            "SCHEDULED": ["PAID"],
+            "SCHEDULED": ["PAID", "APPROVED"],
             "PAID": [],
             "WRITTEN_OFF": [],
             "CANCELLED": [],
@@ -262,6 +264,7 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
     StateMachine(
         "return_request",
         {
+            "PENDING_APPROVAL": ["REQUESTED", "REJECTED"],
             "REQUESTED": ["RMA_APPROVED", "REJECTED"],
             "RMA_APPROVED": ["PICKUP_SCHEDULED"],
             "PICKUP_SCHEDULED": ["PICKED"],
@@ -290,6 +293,16 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
             "CANCELLED": [],
         },
         "NOTIFIED",
+    ),
+    StateMachine(
+        "complaint",
+        {
+            "OPEN": ["INVESTIGATION", "RESOLVED", "CLOSED"],
+            "INVESTIGATION": ["RESOLVED", "CLOSED"],
+            "RESOLVED": ["CLOSED"],
+            "CLOSED": [],
+        },
+        "OPEN",
     ),
     StateMachine(
         "deviation",
@@ -338,6 +351,27 @@ MACHINES: Dict[str, StateMachine] = {m.name: m for m in [
         },
         "PENDING",
     ),
+    StateMachine(
+        "change_request",
+        {
+            "SUBMITTED": ["IN_REVIEW", "CANCELLED"],
+            "IN_REVIEW": ["APPROVED", "REJECTED"],
+            "APPROVED": ["IMPLEMENTED"],
+            "IMPLEMENTED": ["CLOSED"],
+            "CLOSED": [],
+            "REJECTED": [],
+            "CANCELLED": [],
+        },
+        "SUBMITTED",
+    ),
+    StateMachine(
+        "risk_assessment",
+        {
+            "OPEN": ["CLOSED"],
+            "CLOSED": [],
+        },
+        "OPEN",
+    ),
 ]}
 
 
@@ -359,7 +393,11 @@ async def transition(
     event_name: Optional[str] = None,
     event_payload: Optional[dict] = None,
 ) -> dict:
-    """Validate + apply a state transition with timeline, event and audit."""
+    """Validate + apply a state transition with timeline, event and audit.
+
+    Optimistic concurrency: when the entity carries a `version` field the
+    status+version bump is a single atomic conditional update — two racing
+    transitions from the same state can never both succeed (BUG-2)."""
     machine = get_machine(entity_type)
     entity = await db.db[collection].find_one({id_field: entity_id})
     if not entity:
@@ -388,7 +426,18 @@ async def transition(
             update["$set"][k] = v
         for k, v in extra_update.get("$inc", {}).items():
             update["$inc"][k] = update["$inc"].get(k, 0) + v
-    await db.db[collection].update_one({id_field: entity_id}, update)
+    # Atomic guard: only transition if the entity is still in from_state.
+    # (Legitimate callers may only be transitioning FROM a read state; races
+    # surface as modified_count == 0 → WorkflowError, not a silent overwrite.)
+    if entity.get("version") is not None:
+        cond = {id_field: entity_id, "status": from_state}
+    else:
+        cond = {id_field: entity_id, "status": {"$eq": from_state}}
+    res = await db.db[collection].update_one(cond, update)
+    if res.modified_count == 0:
+        raise WorkflowError(
+            f"Concurrent modification of {entity_type} {entity_id}: state "
+            f"{from_state} changed; retry with fresh data")
     await bus_publish(event_name or f"{entity_type}.{to_state.lower()}",
                       event_payload or {"entity_type": entity_type, "id": entity_id,
                                         "from": from_state, "to": to_state},
@@ -444,3 +493,14 @@ async def record_node(
         },
         upsert=True,
     )
+
+
+async def machine_overview() -> dict:
+    """Registry introspection for the Workflow Viewer: every machine, its
+    states and allowed transitions (invalid jumps are impossible by design)."""
+    return {m.name: {
+        "initial": m.initial,
+        "states": sorted(set(list(m.transitions.keys()) +
+                             [s for v in m.transitions.values() for s in v])),
+        "transitions": {k: v for k, v in m.transitions.items()},
+    } for m in MACHINES.values()}

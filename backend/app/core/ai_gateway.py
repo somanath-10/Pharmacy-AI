@@ -8,7 +8,7 @@ source of truth.
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from app.core.config import settings
 
@@ -56,11 +56,51 @@ class AIGateway:
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
             resp = await client.chat.completions.create(**kwargs)
+            # Token/cost usage tracking (production observability): every call
+            # is metered so agent dashboards can show real spend.
+            try:
+                usage = getattr(resp, "usage", None)
+                await self._record_usage(
+                    resp.model if hasattr(resp, "model") else settings.OPENAI_MODEL,
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0)
+            except Exception:
+                pass  # metering must never break the AI call
             return AIResult({"ok": True, "fallback": False,
                              "text": resp.choices[0].message.content or ""})
         except Exception as e:
             log.warning("openai failed → fallback: %s", e)
             return AIResult({"ok": False, "fallback": True, "text": "", "error": str(e)[:200]})
+
+    async def _record_usage(self, model: str, prompt_tokens: int,
+                            completion_tokens: int):
+        """Persist usage for cost dashboards; daily aggregate upserted."""
+        from datetime import date
+
+        from app.core.database import db, now_iso
+
+        day = date.today().isoformat()
+        cost = self.estimate_cost(model, prompt_tokens, completion_tokens)
+        await db.db.ai_usage.update_one(
+            {"model": model, "day": day},
+            {"$inc": {"calls": 1, "prompt_tokens": prompt_tokens,
+                      "completion_tokens": completion_tokens,
+                      "estimated_cost_usd": cost},
+             "$set": {"updated_at": now_iso()}},
+            upsert=True)
+
+    @staticmethod
+    def estimate_cost(model: str, prompt_tokens: int,
+                      completion_tokens: int) -> float:
+        """Rough USD estimate from public list prices (per 1M tokens)."""
+        rates = {
+            "gpt-4o-mini": (0.15, 0.60),
+            "gpt-4o": (2.50, 10.00),
+            "gpt-4.1-mini": (0.40, 1.60),
+            "gpt-4.1": (2.00, 8.00),
+        }
+        p, c = rates.get(model, (1.00, 4.00))  # conservative default
+        return round(prompt_tokens / 1e6 * p + completion_tokens / 1e6 * c, 6)
 
     async def extract_json(self, system: str, user: str) -> AIResult:
         res = await self.complete(system, user, json_mode=True)

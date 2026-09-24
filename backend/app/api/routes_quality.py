@@ -3,6 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
 
+from app.core.rbac import require_command
 from app.core.security import get_current_principal
 from app.domains import pharmacy as pharm_svc
 from app.domains import production as prod_svc
@@ -321,3 +322,212 @@ async def dispense(payload: dict = Body(...),
                    principal: dict = Depends(get_current_principal)):
     idem = payload.pop("idempotency_key", None)
     return await pharm_svc.dispense(payload, principal, idem)
+
+
+# ------------------------------------------------- change control & risk (Part 15)
+@qa_router.get("/changes")
+async def list_changes(status: Optional[str] = Query(None),
+                       principal: dict = Depends(get_current_principal)):
+    q = {"status": status} if status else {}
+    from app.core.database import db as _db
+
+    out = []
+    async for c in _db.db.change_requests.find(q).sort("created_at", -1).limit(200):
+        c.pop("_id", None)
+        out.append(c)
+    return out
+
+
+@qa_router.post("/changes")
+async def create_change(payload: dict = Body(...),
+                        principal: dict = Depends(get_current_principal)):
+    return await qa_svc.create_change_request(payload, principal)
+
+
+@qa_router.post("/changes/{change_id}/assess")
+async def assess_change(change_id: str, payload: dict = Body(...),
+                        principal: dict = Depends(get_current_principal)):
+    return await qa_svc.assess_change(change_id, payload, principal)
+
+
+@qa_router.post("/changes/{change_id}/approve")
+async def approve_change(change_id: str, payload: dict = Body(...),
+                         principal: dict = Depends(require_command("qa:release"))):
+    return await qa_svc.approve_change(change_id, payload, principal)
+
+
+@qa_router.post("/changes/{change_id}/implement")
+async def implement_change(change_id: str, payload: dict = Body(default={}),
+                           principal: dict = Depends(require_command("qa:release"))):
+    return await qa_svc.implement_change(change_id, payload, principal)
+
+
+@qa_router.post("/changes/{change_id}/verify")
+async def verify_change(change_id: str, payload: dict = Body(default={}),
+                        principal: dict = Depends(require_command("qa:release"))):
+    return await qa_svc.verify_change(change_id, payload, principal)
+
+
+@qa_router.get("/risks")
+async def list_risks(status: Optional[str] = Query(None),
+                     principal: dict = Depends(get_current_principal)):
+    return await qa_svc.list_risk_assessments(status)
+
+
+@qa_router.post("/risks")
+async def create_risk(payload: dict = Body(...),
+                      principal: dict = Depends(get_current_principal)):
+    return await qa_svc.create_risk_assessment(payload, principal)
+
+
+@qa_router.post("/risks/{risk_id}/close")
+async def close_risk(risk_id: str, payload: dict = Body(...),
+                     principal: dict = Depends(get_current_principal)):
+    return await qa_svc.close_risk_assessment(risk_id, payload, principal)
+
+
+@qa_router.get("/capas/overdue")
+async def capa_overdue(principal: dict = Depends(get_current_principal)):
+    return await qa_svc.capa_overdue_report()
+
+
+@qa_router.post("/capas/{capa_id}/close")
+async def close_capa(capa_id: str, payload: dict = Body(...),
+                     principal: dict = Depends(require_command("qa:release"))):
+    return await qa_svc.close_capa(capa_id, payload, principal)
+
+
+# ------------------------------------------------- reagents & stability (Part 11)
+@qc_router.post("/reagents")
+async def register_reagent(payload: dict = Body(...),
+                           principal: dict = Depends(get_current_principal)):
+    return await qc_svc.register_reagent(payload, principal)
+
+
+@qc_router.get("/reagents")
+async def list_reagents(principal: dict = Depends(get_current_principal)):
+    from app.core.database import db as _db
+
+    out = []
+    async for r in _db.db.reagents.find({}).limit(200):
+        r.pop("_id", None)
+        out.append(r)
+    return out
+
+
+@qc_router.post("/stability")
+async def create_stability(payload: dict = Body(...),
+                           principal: dict = Depends(get_current_principal)):
+    return await qc_svc.create_stability_study(payload, principal)
+
+
+@qc_router.post("/stability/{study_id}/results")
+async def add_stability_result(study_id: str, payload: dict = Body(...),
+                               principal: dict = Depends(get_current_principal)):
+    return await qc_svc.record_stability_result(study_id, payload, principal)
+
+
+# ==================================================================
+# Phase: Plant completion routes — plans, waste, packing, FG release,
+# traceability, progress, yield anomalies.
+# ==================================================================
+@production_router.post("/plans")
+async def create_plan(payload: dict = Body(...),
+                      principal: dict = Depends(get_current_principal)):
+    return await prod_svc.create_production_plan(payload, principal)
+
+
+@production_router.get("/plans")
+async def list_plans(principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+
+    out = []
+    for r in await db.db.production_plans.find({}).sort("created_at", -1).to_list(50):
+        r.pop("_id", None)
+        out.append(r)
+    return out
+
+
+@production_router.post("/plans/{plan_id}/cut/{product_id}")
+async def cut_from_plan(plan_id: str, product_id: str, payload: dict = Body(default={}),
+                        principal: dict = Depends(get_current_principal)):
+    return await prod_svc.cut_order_from_plan(plan_id, product_id, principal,
+                                              payload.get("idempotency_key"))
+
+
+@production_router.get("/requirements/{product_id}")
+async def material_requirements(product_id: str, batch_size: float = Query(...),
+                                principal: dict = Depends(get_current_principal)):
+    return await prod_svc.material_requirement(product_id, batch_size)
+
+
+@production_router.post("/orders/{order_id}/waste")
+async def record_waste(order_id: str, payload: dict = Body(...),
+                       principal: dict = Depends(get_current_principal)):
+    return await prod_svc.record_waste(order_id, payload, principal)
+
+
+@production_router.post("/orders/{order_id}/packing")
+async def record_packing(order_id: str, payload: dict = Body(...),
+                         principal: dict = Depends(get_current_principal)):
+    return await prod_svc.record_packing(order_id, payload, principal)
+
+
+@production_router.post("/orders/{order_id}/release-fg")
+async def release_fg(order_id: str,
+                     principal: dict = Depends(get_current_principal)):
+    return await prod_svc.release_fg_to_warehouse(order_id, principal)
+
+
+@production_router.get("/orders/{order_id}/progress")
+async def batch_progress(order_id: str,
+                         principal: dict = Depends(get_current_principal)):
+    return await prod_svc.batch_progress(order_id)
+
+
+@production_router.get("/yield-anomalies")
+async def yield_anomalies(window: int = Query(50),
+                          principal: dict = Depends(get_current_principal)):
+    return await prod_svc.yield_anomalies(window)
+
+
+@production_router.get("/trace/{batch_id}")
+async def trace_batch(batch_id: str,
+                      principal: dict = Depends(get_current_principal)):
+    return await prod_svc.trace_batch(batch_id)
+
+
+# ==================================================================
+# Phase: Pharmacy history routes.
+# ==================================================================
+@pharmacy_router.get("/dispenses")
+async def dispense_history(rx_id: Optional[str] = Query(None),
+                           patient: Optional[str] = Query(None),
+                           principal: dict = Depends(get_current_principal)):
+    return await pharm_svc.dispense_history(rx_id=rx_id, patient=patient)
+
+
+@pharmacy_router.get("/prescriptions/history")
+async def rx_history(patient: Optional[str] = Query(None),
+                     status: Optional[str] = Query(None),
+                     principal: dict = Depends(get_current_principal)):
+    return await pharm_svc.prescription_history(patient=patient, status=status)
+
+
+@pharmacy_router.get("/controlled-register")
+async def controlled_register(from_date: Optional[str] = Query(None),
+                              principal: dict = Depends(get_current_principal)):
+    return await pharm_svc.controlled_register_history(from_date=from_date)
+
+
+@qa_router.get("/batch-releases")
+async def list_batch_releases(status: Optional[str] = Query(None),
+                              principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+
+    q = {"decision": status} if status else {}
+    rows = []
+    async for b in db.db.batch_releases.find(q).sort("created_at", -1).limit(200):
+        b.pop("_id", None)
+        rows.append(b)
+    return rows

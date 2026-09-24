@@ -5,45 +5,41 @@ import { Topbar } from "../App";
 import { Kpi, Badge, Table, When, useToast } from "../ui";
 
 const DEPTS = [
-  ["Sales", "📈"], ["Purchase", "🛒"], ["QA", "🛡️"], ["QC", "🧪"],
-  ["Warehouse", "📦"], ["Plant", "🏭"], ["Logistics", "🚚"],
-  ["Regulatory", "⚖️"], ["Finance", "💰"],
+  ["warehouse", "Warehouse", "📦"], ["quality", "QA / QC", "🛡️"],
+  ["plant", "Plant", "🏭"], ["logistics", "Logistics", "🚚"],
+  ["finance", "Finance", "💰"],
 ];
 
 const INPUTS = [
   ["📧", "Emails", "Inquiries & replies"],
   ["📄", "RFQs / Inquiries", "Customers & vendors"],
-  ["💬", "Customer Chatbot", "Website / portal"],
   ["📕", "PO PDFs", "Customer POs via Doc AI"],
   ["📋", "Vendor Documents", "Certs, licences, CoA"],
   ["🚚", "Shipment Events", "Tracking & handovers"],
 ];
 const OUTPUTS = [
-  ["✅", "Confirmed Orders", "blue"],
-  ["🧾", "Procurement Tasks", "blue"],
-  ["🏷️", "Batch Release", "purple"],
-  ["🚛", "Dispatch", "green"],
-  ["✉️", "Customer Updates", "blue"],
-  ["⚠️", "Alerts & Exceptions", "orange"],
+  ["✅", "Confirmed Orders"], ["🧾", "Procurement Tasks"], ["🏷️", "Batch Release"],
+  ["🚛", "Dispatch"], ["✉️", "Customer Updates"], ["⚠️", "Alerts & Exceptions"],
 ];
 
 const MODULES = [
-  ["📈", "Sales", "Lead to Order"], ["🎧", "Customer Service", "Engage & Support"],
-  ["🛒", "Purchase", "Procure & Manage"], ["👥", "Vendor Mgmt", "Onboard & Govern"],
-  ["📆", "Planning", "Demand & Supply"], ["⚖️", "Regulatory", "Compliance & Filings"],
-  ["🛡️", "QA", "Quality Assurance"], ["🧪", "QC", "Quality Control"],
-  ["🏭", "Plant", "Manufacturing Ops"], ["📦", "Warehouse", "Inventory & Storage"],
-  ["🚚", "Logistics", "Distribute & Deliver"], ["💰", "Finance", "Billing & Reconciliation"],
-  ["📄", "Document AI", "Extract · Understand"], ["✉️", "Email AI", "Read · Respond"],
-  ["📊", "Analytics", "Insights & Intelligence"],
+  ["📈", "Sales", "Lead to Order", "/sales"], ["🎧", "Customer Service", "Engage & Support", "/sales"],
+  ["🛒", "Purchase", "Procure & Manage", "/vendors"], ["👥", "Vendor Mgmt", "Onboard & Govern", "/vendors"],
+  ["📆", "Planning", "Demand & Supply", "/supply"], ["⚖️", "Regulatory", "Compliance & Filings", "/exceptions"],
+  ["🛡️", "QA", "Quality Assurance", "/quality"], ["🧪", "QC", "Quality Control", "/quality"],
+  ["🏭", "Plant", "Manufacturing Ops", "/plant"], ["📦", "Warehouse", "Inventory & Storage", "/warehouse"],
+  ["🚚", "Logistics", "Distribute & Deliver", "/logistics"], ["💰", "Finance", "Billing & Reconciliation", "/finance"],
+  ["📄", "Document AI", "Extract · Understand", "/agents"], ["✉️", "Email AI", "Read · Respond", "/agents"],
+  ["📊", "Analytics", "Insights & Intelligence", "/agents"],
 ];
 
 export default function CommandCenter() {
   const nav = useNavigate();
-  const toast = useToast();
+  const { toast, toastHost } = useToast();
   const [cc, setCc] = useState(null);
   const [approvals, setApprovals] = useState([]);
   const [err, setErr] = useState("");
+  const [pulse, setPulse] = useState(0);
 
   useEffect(() => {
     let stop = false;
@@ -57,43 +53,69 @@ export default function CommandCenter() {
       } catch (e) { if (!stop) setErr(e.message); }
     };
     load();
-    const t = setInterval(load, 12000);
+    const t = setInterval(() => { load(); setPulse((p) => p + 1); }, 12000);
     return () => { stop = true; clearInterval(t); };
   }, []);
 
-  const decide = async (a, decision) => {
+  const decide = async (a, decision, extra) => {
     try {
       await api(`/api/approvals/${a.approval_id}/decide`,
-                { method: "POST", body: { decision, reason: `${decision} from Command Center` } });
-      toast(`${a.entity_id || "Item"} ${decision.toLowerCase()}d`);
+                { method: "POST", body: { decision, reason: `${decision} from Command Center`, ...extra } });
+      toast(`${a.entity_id || "Item"} ${decision.toLowerCase()}d`, "ok");
       setApprovals((rows) => rows.filter((x) => x.approval_id !== a.approval_id));
     } catch (e) { toast(e.message, "err"); }
   };
 
-  const k = cc || {};
-  const agents = k.agents || [];
-  const activeAgents = agents.filter((a) => a.status !== "ERROR").length || 15;
+  const k = cc?.kpis || {};
+  const errors = cc?.errors || {};
+  const loadFailed = !cc && !!err;
+  const fmtErr = (key) => errors[key]
+    ? <span className="small text-red">⚠ Unavailable: {errors[key]}</span> : null;
 
   return (
     <div>
+      {toastHost}
       <Topbar title="Unified AI Command Center"
-              sub="One screen for customers, vendors, departments, documents, orders and human approvals — in real time" />
-      {err && <div className="error-box mb">{err}</div>}
+              sub="Live enterprise status — every number is real; failures show as errors, never as fake values" />
+      {err && <div className="error-box mb">Failed to load command center data: {err}</div>}
 
-      {/* KPI strip */}
+      {/* KPI strip — Part 1 metrics, all real */}
       <div className="grid kpi-6 mb">
-        <Kpi ico="🤖" label="Active Agents" value={activeAgents} delta="+33%" foot="Across the enterprise" />
-        <Kpi ico="📄" label="Open Sales Orders" value={k.open_sales_orders ?? "—"} delta="+12%" foot="In progress" />
-        <Kpi ico="🛒" label="Open POs" value={k.open_purchase_orders ?? "—"} delta="+9%" foot="Procure & manage" />
-        <Kpi ico="🙋" tone="orange" label="Human Decisions" value={approvals.length} delta="!"> 
-        </Kpi>
-        <Kpi ico="🏭" label="Plant Readiness" value={k.plant_readiness != null ? `${k.plant_readiness}%` : "—"} delta="+6%" foot="Equipment & calibration" />
-        <Kpi ico="🚚" label="On-time Dispatch" value={k.on_time_dispatch != null ? `${k.on_time_dispatch}%` : "—"} delta="+4%" foot="This month" />
+        <Kpi ico="🤖" label="Active Agents"
+             value={k.agents ? `${k.agents.active}/${k.agents.total}` : "…"}
+             foot={k.agents?.degraded?.length ? `degraded: ${k.agents.degraded.join(", ")}` : "all governed & audited"}
+             tone="purple" />
+        <Kpi ico="⚙️" label="Automation rate"
+             value={k.automation ? `${k.automation.automation_rate_pct}%` : "…"}
+             foot={k.automation ? `${k.automation.audited_actions_24h} audited actions / 24h` : ""} />
+        <Kpi ico="🙋" label="Human touch rate"
+             value={k.automation ? `${k.automation.human_touch_rate_pct}%` : "…"}
+             foot="of audited actions were human" tone="blue" />
+        <Kpi ico="⚠️" label="Open exceptions"
+             value={k.exceptions ? k.exceptions.total : "…"}
+             foot={k.exceptions ? `${k.exceptions.invoice_mismatches} invoice · ${k.exceptions.oos_investigations} OOS · ${k.exceptions.shipment_exceptions} ship` : ""}
+             tone={k.exceptions?.total ? "orange" : "green"} />
+        <Kpi ico="📋" label="Pending approvals"
+             value={k.pending_approvals ?? "…"} foot="awaiting human decision"
+             tone={k.pending_approvals ? "orange" : "green"} />
+        <Kpi ico="📈" label="Open orders"
+             value={k.orders ? `S:${k.orders.sales} P:${k.orders.purchase}` : "…"}
+             foot="sales / purchase" tone="teal" />
       </div>
+
+      {/* domain error banner — honest per-domain failure reporting */}
+      {Object.keys(errors).length > 0 && (
+        <div className="error-box mb">
+          <b>Some domains are unavailable right now:</b>{" "}
+          {Object.entries(errors).map(([k2, v]) => (
+            <div className="small" key={k2}>• {k2}: {v}</div>
+          ))}
+        </div>
+      )}
 
       {/* Core row: inputs | core | outputs */}
       <div className="grid layout-3col mb">
-        <div className="card side-card">
+        <div className="card side-card rise d1">
           <h3>Live inputs</h3>
           <div className="card-sub">Real-time data from across the enterprise</div>
           {INPUTS.map(([ico, b, s]) => (
@@ -105,19 +127,19 @@ export default function CommandCenter() {
           ))}
         </div>
 
-        <div className="core-panel">
+        <div className="core-panel rise d2">
           <div className="core-head">
             <span className="spark">✦</span>
             <div>
               <h2>AI Orchestration Core</h2>
               <div className="core-sub">Domain agents working together across the enterprise</div>
             </div>
-            <span className="live"><span className="dot pulse" /> Live · Orchestrating in real time</span>
+            <span className="live"><span className="dot pulse" /> Live · {pulse}</span>
           </div>
           <div className="module-grid">
-            {MODULES.map(([ico, name, sub]) => (
+            {MODULES.map(([ico, name, sub, to]) => (
               <div className="module-tile" key={name}
-                   onClick={() => nav("/sales")} style={{ cursor: "pointer" }}>
+                   onClick={() => to && nav(to)}>
                 <span className="st green" />
                 <div className="ico">{ico}</div>
                 <b>{name}</b>
@@ -131,15 +153,12 @@ export default function CommandCenter() {
           </div>
         </div>
 
-        <div className="card side-card">
+        <div className="card side-card rise d3">
           <h3>Outputs & actions</h3>
           <div className="card-sub">From insight to execution, seamlessly</div>
-          {OUTPUTS.map(([ico, b, tone]) => (
+          {OUTPUTS.map(([ico, b]) => (
             <div className="out-row" key={b}>
-              <span className="ico" style={{
-                background: tone === "orange" ? "var(--orange-soft)"
-                  : tone === "purple" ? "var(--purple-soft)"
-                  : tone === "green" ? "var(--green-soft)" : "var(--blue-soft)" }}>{ico}</span>
+              <span className="ico" style={{ background: "var(--blue-soft)" }}>{ico}</span>
               <div><b>{b}</b><small>automated by agents</small></div>
               <span className="dot green" />
             </div>
@@ -147,76 +166,95 @@ export default function CommandCenter() {
         </div>
       </div>
 
-      {/* Department health + decision queue */}
+      {/* Department status + decision queue */}
       <div className="grid cols-2 mb" style={{ gridTemplateColumns: "1.6fr 1fr" }}>
-        <div className="card">
-          <h3>Department health</h3>
-          <div className="card-sub">Real-time status across all functions</div>
+        <div className="card rise d4">
+          <h3>Department status</h3>
+          <div className="card-sub">Derived from live counters — no synthetic scores</div>
           <div className="dept-grid">
-            {DEPTS.map(([name, ico], idx) => {
-              const health = k.department_health || {};
-              const pct = health[name] != null ? health[name] : 88 + ((idx * 7) % 12);
-              const attn = pct < 92;
+            {DEPTS.map(([key, name, ico]) => {
+              const d = k[key];
+              if (errors[key] || !d) {
+                return (
+                  <div className="dept" key={key}>
+                    <div className="ico">{ico}</div>
+                    <b>{name}</b>
+                    <small className="text-red">Unavailable</small>
+                    <span className="dot red" />
+                    <div className="small muted" style={{ marginTop: 4 }}>{errors[key] || "loading…"}</div>
+                    <div className="bar"><i className="warn" style={{ width: "0%" }} /></div>
+                  </div>
+                );
+              }
+              const attn = d.status !== "HEALTHY";
               return (
-                <div className="dept" key={name}>
+                <div className="dept" key={key}>
                   <div className="ico">{ico}</div>
                   <b>{name}</b>
-                  <small>{attn ? "Attention" : "On track"}</small>
-                  <span className={`dot ${attn ? "orange" : "green"}`} />
-                  <div style={{ fontWeight: 800, color: "var(--navy)", marginTop: 4 }}>{pct}%</div>
+                  <small>{d.status === "HEALTHY" ? "On track" : d.status}</small>
+                  <span className={`dot ${d.status === "HEALTHY" ? "green" : d.status === "CRITICAL" ? "red" : "orange"}`} />
+                  <div style={{ fontWeight: 800, color: "var(--navy)", marginTop: 4 }}>{d.score}%</div>
+                  <div className="bar">
+                    <i className={d.status !== "HEALTHY" ? "warn" : ""} style={{ width: `${d.score}%` }} />
+                  </div>
+                  <div className="small muted">
+                    {key === "warehouse" && `${d.quarantine_rows} quarantine rows · ${d.open_pick_tasks} picks`}
+                    {key === "quality" && `${d.active_holds} holds · ${d.oos_open} OOS`}
+                    {key === "plant" && `${d.batches_in_process} batches in process`}
+                    {key === "logistics" && `${d.in_transit} in transit · ${d.exceptions} exceptions`}
+                    {key === "finance" && `AP:${d.ap_open} AR:${d.ar_open} · ${d.invoice_exceptions} exceptions`}
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        <div className="card">
+        <div className="card rise d5">
           <div className="row">
             <h3>Decision queue</h3>
             <div className="spacer" />
-            <a className="small" style={{ color: "var(--blue)", fontWeight: 700, cursor: "pointer" }}
-               onClick={() => nav("/queue")}>View all ({approvals.length}) →</a>
+            <a className="link small" onClick={() => nav("/queue")}>View all ({approvals.length}) →</a>
           </div>
-          <div className="card-sub">Human role: approve, review, reject only — AI assembles the evidence</div>
-          <Table
-            empty="🎉 No human decisions pending — agents resolved everything"
-            columns={[
-              { key: "entity_id", label: "Item", render: (r) => <span className="mono">{r.entity_id || r.approval_id}</span> },
-              { key: "category", label: "Type", render: (r) => <Badge value={r.category} /> },
-              { key: "title", label: "From", render: (r) => <span className="small">{(r.title || "").slice(0, 34)}</span> },
-              { key: "created_at", label: "Date", render: (r) => <span className="small">{When(r.created_at)}</span> },
-              { key: "act", label: "Action", render: (r) => (
-                <span className="row" style={{ gap: 6 }}>
-                  <button className="btn approve sm" onClick={(e) => { e.stopPropagation(); decide(r, "APPROVED"); }}>Approve</button>
-                  <button className="btn reject sm" onClick={(e) => { e.stopPropagation(); decide(r, "REJECTED"); }}>Reject</button>
-                </span>
-              )},
-            ]}
-            rows={approvals.slice(0, 5)} />
+          <div className="card-sub">Human role: approve, review, reject, escalate — AI assembles the evidence</div>
+          {loadFailed
+            ? <div className="error-box">Approvals unavailable: {err}</div>
+            : <Table
+                empty="No human decisions pending — agents resolved everything"
+                rows={approvals.slice(0, 5)}
+                columns={[
+                  { key: "entity_id", label: "Item", render: (r) => <span className="mono">{r.entity_id || r.approval_id}</span> },
+                  { key: "category", label: "Type", render: (r) => <Badge>{r.category}</Badge> },
+                  { key: "created_at", label: "Raised", render: (r) => <span className="small">{When(r.created_at)}</span> },
+                  { key: "act", label: "Action", render: (r) => (
+                    <span className="row" style={{ gap: 6 }}>
+                      <button className="btn approve sm" onClick={(e) => { e.stopPropagation(); decide(r, "APPROVED"); }}>Approve</button>
+                      <button className="btn ghost sm" onClick={(e) => { e.stopPropagation(); decide(r, "ESCALATED"); }}>Escalate</button>
+                    </span>
+                  )},
+                ]} />}
         </div>
       </div>
 
-      {/* agent strip */}
-      <div className="card">
+      {/* agent strip — real fleet only */}
+      <div className="card rise d6">
         <h3>Agent fleet</h3>
         <div className="card-sub">Every agent is permission-gated, audited and policy-bound</div>
-        <div className="tag-list">
-          {(agents.length ? agents : ["supervisor-agent", "sales-agent", "procurement-agent",
-            "warehouse-agent", "qa-agent", "qc-agent", "plant-agent", "pharmacy-agent",
-            "logistics-agent", "finance-agent", "compliance-agent", "safety-agent",
-            "supply-chain-agent", "analytics-agent", "document-ai-agent"]
-          ).map((a) => {
-            const name = typeof a === "string" ? a : a.name;
-            const st = typeof a === "object" ? a.status : "ACTIVE";
-            return (
-              <span key={name} className={`badge ${st === "ERROR" ? "red" : "green"}`}
-                    style={{ fontSize: 12, padding: "6px 12px" }}>
-                <span className={`dot ${st === "ERROR" ? "red" : "green"}`} style={{ width: 6, height: 6 }} />
-                {name}
-              </span>
-            );
-          })}
-        </div>
+        {k.agents
+          ? <div className="tag-list">
+              {(k.agents.degraded || []).length === 0
+                ? <span className="badge green" style={{ fontSize: 12, padding: "6px 12px" }}>
+                    <span className="dot green" style={{ width: 6, height: 6 }} />
+                    All {k.agents.total} agents ACTIVE
+                  </span>
+                : k.agents.degraded.map((name) => (
+                  <span key={name} className="badge red" style={{ fontSize: 12, padding: "6px 12px" }}>
+                    <span className="dot red" style={{ width: 6, height: 6 }} />{name}
+                  </span>
+                ))}
+              <a className="link small" onClick={() => nav("/agents")}>Agent Activity →</a>
+            </div>
+          : <div className="skeleton" style={{ height: 36 }} />}
       </div>
     </div>
   );

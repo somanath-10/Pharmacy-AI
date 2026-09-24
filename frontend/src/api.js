@@ -1,23 +1,55 @@
 const BASE = "";
 
 let token = localStorage.getItem("pharmaos_token") || "";
+let refresh = localStorage.getItem("pharmaos_refresh") || "";
 let me = JSON.parse(localStorage.getItem("pharmaos_me") || "null");
 
-export function setAuth(t, user) {
+export function setAuth(t, user, r = undefined) {
   token = t || "";
-  me = user || null;
+  if (r !== undefined) refresh = r || "";
   if (t) localStorage.setItem("pharmaos_token", t);
   else localStorage.removeItem("pharmaos_token");
+  if (r !== undefined) {
+    if (r) localStorage.setItem("pharmaos_refresh", r);
+    else localStorage.removeItem("pharmaos_refresh");
+  }
   if (user) localStorage.setItem("pharmaos_me", JSON.stringify(user));
   else localStorage.removeItem("pharmaos_me");
 }
 
 export function getToken() { return token; }
+export function getRefresh() { return refresh; }
 export function getMe() { return me; }
 
 const listeners = new Set();
 export function onAuthChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 function emit() { listeners.forEach((fn) => fn(me)); }
+
+let refreshing = null;
+
+async function doRefresh() {
+  if (!refresh) return false;
+  if (!refreshing) {
+    refreshing = (async () => {
+      try {
+        const res = await fetch(BASE + "/api/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refresh }),
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        setAuth(data.access_token, me, data.refresh_token);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshing = null;
+      }
+    })();
+  }
+  return refreshing;
+}
 
 export async function api(path, { method = "GET", body, headers = {}, idemKey } = {}) {
   const h = { ...headers };
@@ -30,8 +62,15 @@ export async function api(path, { method = "GET", body, headers = {}, idemKey } 
   });
   let data = null;
   try { data = await res.json(); } catch { /* empty */ }
-  if (res.status === 401) {
+  if (res.status === 401 && refresh && !path.startsWith("/api/auth/")) {
+    // short-lived access token expired → rotate refresh once, retry request
+    const ok = await doRefresh();
+    if (ok) return api(path, { method, body, headers, idemKey });
     setAuth(null, null); emit();
+    throw new Error("Session expired");
+  }
+  if (res.status === 401) {
+    if (!path.startsWith("/api/auth/")) { setAuth(null, null); emit(); }
     throw new Error((data && data.message) || "Session expired");
   }
   if (!res.ok) {
@@ -41,11 +80,27 @@ export async function api(path, { method = "GET", body, headers = {}, idemKey } 
   return data;
 }
 
-export async function login(email, password) {
-  const data = await api("/api/auth/login", { method: "POST", body: { email, password } });
-  setAuth(data.access_token, data.user || { email, roles: [] });
+export async function login(email, password, mfaCode) {
+  const data = await api("/api/auth/login", {
+    method: "POST",
+    body: { email, password, ...(mfaCode ? { mfa_code: mfaCode } : {}) },
+  });
+  setAuth(data.access_token, data.user || { email, roles: [] }, data.refresh_token);
   emit();
   return data;
 }
 
-export function logout() { setAuth(null, null); emit(); }
+export async function logout() {
+  // server-side revocation of the refresh token, then clear local session
+  try {
+    if (refresh) {
+      await fetch(BASE + "/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ refresh_token: refresh }),
+      });
+    }
+  } catch { /* best effort */ }
+  setAuth(null, null, "");
+  emit();
+}

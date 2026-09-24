@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
-import { api } from "./api";
+import { api, getToken, getMe, onAuthChange, logout } from "./api";
 import { ToastHost } from "./ui";
 import Login from "./pages/Login";
 import CommandCenter from "./pages/CommandCenter";
@@ -15,24 +15,72 @@ import LogisticsWorkspace from "./pages/LogisticsWorkspace";
 import FinanceWorkspace from "./pages/FinanceWorkspace";
 import DecisionQueue from "./pages/DecisionQueue";
 import WorkflowViewer from "./pages/WorkflowViewer";
+import AgentActivity from "./pages/AgentActivity";
+import ExceptionCenter from "./pages/ExceptionCenter";
+import AdminPage from "./pages/AdminPage";
+import ExecutiveDashboard from "./pages/ExecutiveDashboard";
 
-const NAV = [
-  { section: "AI Operations" },
-  { to: "/", label: "AI Command Center", ico: "🧠", end: true },
-  { to: "/queue", label: "Human Decision Queue", ico: "🙋", pill: "human" },
-  { section: "Workspaces" },
-  { to: "/sales", label: "Customers & Sales", ico: "📈" },
-  { to: "/supply", label: "Supply Chain", ico: "📆" },
-  { to: "/vendors", label: "Vendors & Procurement", ico: "🛒" },
-  { to: "/warehouse", label: "Warehouse & Inventory", ico: "📦" },
-  { to: "/quality", label: "Quality (QA/QC)", ico: "🧪" },
-  { to: "/plant", label: "Plant / Production", ico: "🏭" },
-  { to: "/pharmacy", label: "Pharmacy", ico: "💊" },
-  { to: "/logistics", label: "Logistics", ico: "🚚" },
-  { to: "/finance", label: "Finance & Governance", ico: "💰" },
-  { section: "Governance" },
-  { to: "/workflows", label: "Workflow Viewer", ico: "🔍" },
+// Role-aware navigation: users only see modules their roles permit.
+// Sections follow the blueprint main-menu order (Part 4). Backend
+// authorization remains authoritative — this only declutters the UI.
+const NAV_ITEMS = [
+  { to: "/", label: "AI Command Center", ico: "🧠", end: true, roles: "any", section: "Overview" },
+  { to: "/executive", label: "Executive Dashboard", ico: "📊",
+    roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Overview" },
+  { to: "/queue", label: "Human Decision Queue", ico: "🙋", pill: "human",
+    roles: ["SUPER_ADMIN", "MANAGEMENT", "FINANCE", "QA", "VENDOR_MANAGER", "PHARMACIST", "COMPLIANCE", "PLANT", "WAREHOUSE"],
+    section: "Overview" },
+  { to: "/exceptions", label: "Exception Center", ico: "⚠️",
+    roles: ["SUPER_ADMIN", "MANAGEMENT", "FINANCE", "QA", "COMPLIANCE", "PLANNING", "LOGISTICS", "WAREHOUSE", "AUDITOR"],
+    section: "Overview" },
+
+  { to: "/sales", label: "Customers / CRM / Sales", ico: "📈",
+    roles: ["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"], section: "Commercial" },
+  { to: "/supply", label: "Supply Chain Planning", ico: "📆",
+    roles: ["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"], section: "Commercial" },
+
+  { to: "/vendors", label: "Vendors / Sourcing / Procurement", ico: "🛒",
+    roles: ["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT", "SUPPLIER"], section: "Supply" },
+
+  { to: "/logistics", label: "Logistics (In/Outbound)", ico: "🚚",
+    roles: ["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT", "SUPPLIER"], section: "Operations" },
+  { to: "/warehouse", label: "Warehouse / WMS / Inventory", ico: "📦",
+    roles: ["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"], section: "Operations" },
+  { to: "/quality", label: "QC / LIMS · QA / QMS", ico: "🧪",
+    roles: ["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"], section: "Operations" },
+
+  { to: "/plant", label: "Plant / Production", ico: "🏭",
+    roles: ["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"], section: "Production & Care" },
+  { to: "/pharmacy", label: "Pharmacy / POS", ico: "💊",
+    roles: ["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"], section: "Production & Care" },
+  { to: "/finance", label: "Finance · Returns · Recall · PV", ico: "💰",
+    roles: ["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE", "QA"], section: "Production & Care" },
+
+  { to: "/agents", label: "Agent Activity", ico: "🤖", roles: "any", section: "Governance" },
+  { to: "/workflows", label: "Workflow Viewer / Audit", ico: "🔍", roles: "any", section: "Governance" },
+  { to: "/admin", label: "Master Data & Administration", ico: "⚙️",
+    roles: ["SUPER_ADMIN", "MANAGEMENT", "COMPLIANCE"], section: "Governance" },
 ];
+
+function visibleNav(me) {
+  const roles = me?.roles || [];
+  const isExternal = roles.includes("SUPPLIER") || roles.includes("CUSTOMER");
+  return NAV_ITEMS.filter((n) => {
+    if (n.roles === "any") return !isExternal;
+    if (!Array.isArray(n.roles)) return true;
+    return n.roles.some((r) => roles.includes(r));
+  });
+}
+
+function navWithSections(me) {
+  const out = [];
+  let last = null;
+  for (const n of visibleNav(me)) {
+    if (n.section !== last) { out.push({ section: n.section }); last = n.section; }
+    out.push(n);
+  }
+  return out;
+}
 
 function Shell({ children }) {
   const me = getMe();
@@ -63,7 +111,7 @@ function Shell({ children }) {
             <small>Autonomous Enterprise Core</small>
           </div>
         </div>
-        {NAV.map((n, i) =>
+        {navWithSections(me).map((n, i) =>
           n.section ? (
             <div className="nav-section" key={`s${i}`}>{n.section.toUpperCase()}</div>
           ) : (
@@ -75,10 +123,11 @@ function Shell({ children }) {
             </NavLink>
           )
         )}
-        <div style={{ marginTop: 22, padding: "0 8px" }}>
-          <button className="btn ghost sm" style={{ width: "100%" }} onClick={logout}>
-            Sign out
+        <div className="sidebar-foot">
+          <button className="btn ghost sm" style={{ width: "100%", marginBottom: 8 }} onClick={logout}>
+            ⎋ Sign out
           </button>
+          <div>v2 · {visibleNav(me).length} modules visible to your roles</div>
         </div>
       </aside>
       <main className="main">{children}</main>
@@ -86,7 +135,7 @@ function Shell({ children }) {
   );
 }
 
-function Topbar({ title, sub }) {
+export function Topbar({ title, sub }) {
   const me = getMe();
   return (
     <div className="topbar">
@@ -106,7 +155,6 @@ function Topbar({ title, sub }) {
     </div>
   );
 }
-export { Topbar };
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
@@ -134,6 +182,10 @@ export default function App() {
               <Route path="/logistics" element={<LogisticsWorkspace />} />
               <Route path="/finance" element={<FinanceWorkspace />} />
               <Route path="/workflows" element={<WorkflowViewer />} />
+              <Route path="/agents" element={<AgentActivity />} />
+              <Route path="/executive" element={<ExecutiveDashboard />} />
+              <Route path="/exceptions" element={<ExceptionCenter />} />
+              <Route path="/admin" element={<AdminPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Shell>

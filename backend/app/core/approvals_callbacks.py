@@ -88,6 +88,8 @@ def _register_all():
 
     @callback("po_approve")
     async def po_approve(payload: dict, actor: dict):
+        # SoD is re-checked at execution time: a MANAGEMENT approver who also
+        # CREATED the PO is blocked here (enqueue path can't know the creator).
         return await procurement._approve_po(
             payload["po_id"], actor,
             reason="Approved from Human Decision Queue")
@@ -118,6 +120,14 @@ def _register_all():
                          reason="Authorized from Human Decision Queue")
         await audit("PAYMENT", payment_id, "HUMAN_AUTHORIZED", actor)
         return await db.db.payments.find_one({"payment_id": payment_id})
+
+    # ---- Reverse logistics -------------------------------------------------
+    from app.domains.reverse import service as reverse
+
+    @callback("return_approve")
+    async def return_approve(payload: dict, actor: dict):
+        """Human approved a non-policy return → RMA issued."""
+        return await reverse.approve_return(payload["return_id"], actor)
 
 
 _register_all()

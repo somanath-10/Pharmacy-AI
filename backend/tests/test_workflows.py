@@ -82,8 +82,10 @@ async def test_p2p_full_flow(client, seeded, admin_headers):
     r = await client.post(f"/api/procurement/prs/{pr_id}/submit", json={},
                           headers=H)
     assert r.json()["status"] == "APPROVED"  # within policy → auto
-    r = await client.post(f"/api/procurement/prs/{pr_id}/convert", json={},
-                          headers=H)
+    r = await client.post(f"/api/procurement/prs/{pr_id}/convert", json={
+        # pin this test's own BPA: other suites may hold cheaper active BPAs
+        # for the same SKU, and conversion must pick the best commercial terms
+        "vendor_id": vid, "contract_id": contract_id}, headers=H)
     assert r.status_code == 200, r.text
     po_id = r.json()["po_id"]
     # contract price enforced (900 not standard)
@@ -652,10 +654,43 @@ async def test_returns_rtv(client, seeded, admin_headers):
     await client.post(f"/api/qc/grn/{grn['grn_id']}/lines/1/disposition", json={
         "accepted_qty": 10, "rejected_qty": 0, "notes": "ok"}, headers=H)
 
-    # return of damaged goods → RTV
-    so = (await client.get("/api/sales/orders", headers=H)).json()
+    # Create a customer
+    r = await client.post("/api/masters/customers", json={
+        "name": "RTV Test Hospital", "type": "HOSPITAL",
+        "credit_limit": 1000000,
+        "contact": {"email": "rtv@test.com"}}, headers=H)
+    cust = r.json()["code"]
+
+    # Create and ship a sales order for the same product (using released batch)
+    r = await client.post("/api/sales/orders", json={
+        "customer_id": cust,
+        "lines": [{"sku": para["sku"], "quantity": 5}]}, headers=H)
+    so_id = r.json()["order_id"]
+    await client.post(f"/api/sales/orders/{so_id}/confirm", json={}, headers=H)
+    await client.post(f"/api/sales/orders/{so_id}/allocate", json={}, headers=H)
+    r = await client.post("/api/warehouse/pick", json={
+        "sales_order_id": so_id}, headers=H)
+    tasks = r.json()["tasks"]
+    assert tasks
+    for t in tasks:
+        await client.post(f"/api/warehouse/pick/{t['task_id']}/confirm",
+                          json={}, headers=H)
+    await client.post("/api/warehouse/pack", json={
+        "sales_order_id": so_id, "packages": 1}, headers=H)
+    r = await client.post("/api/logistics/shipments", json={
+        "sales_order_id": so_id, "warehouse_id": "WH-MAIN",
+        "ship_to": "RTV Test Hospital"}, headers=H)
+    shp = r.json()["shipment_id"]
+    await client.post(f"/api/logistics/shipments/{shp}/dispatch", json={},
+                      headers=H)
+    await client.post(f"/api/logistics/shipments/{shp}/track", json={
+        "event": "DELIVERED"}, headers=H)
+    await client.post(f"/api/logistics/shipments/{shp}/pod", json={
+        "received_by": "Store"}, headers=H)
+
+    # return of damaged goods → RTV (using the shipped sales order)
     r = await client.post("/api/reverse/returns", json={
-        "sales_order_id": (so[0]["order_id"] if so else None),
+        "sales_order_id": so_id,
         "lines": [{"sku": para["sku"], "quantity": 2, "batch_id": "B-RTV-1"}],
         "reason": "DAMAGED"}, headers=H)
     assert r.status_code == 200, r.text
@@ -779,8 +814,23 @@ async def test_vendor_lifecycle_and_sod(client, seeded, admin_headers):
     r = await client.post(f"/api/vendors/{vid}/approve", json={}, headers=H)
     assert r.status_code == 200
 
-    # bank change → goes to queue
+    # bank change → OTP verification step, then SECURITY_FRAUD queue (two-step,
+    # per the hardened vendor-bank flow)
     r = await client.post(f"/api/vendors/{vid}/bank-details", json={
+        "bank_details": {"account": "NEW-ACC-1", "ifsc": "ABCD0001"}},
+        headers=H)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("otp_sent") is True
+    # Test-only bypass: replace OTP hash with known value
+    from app.core.database import db
+    import hashlib
+    test_otp = "123456"
+    await db.db.vendor_bank_verifications.update_one(
+        {"vendor_id": vid, "requested_by": "test-admin"},
+        {"$set": {"otp_hash": hashlib.sha256(test_otp.encode()).hexdigest()}})
+    r = await client.post(f"/api/vendors/{vid}/bank-details", json={
+        "otp": test_otp,
         "bank_details": {"account": "NEW-ACC-1", "ifsc": "ABCD0001"}},
         headers=H)
     assert r.status_code == 200
@@ -793,6 +843,9 @@ async def test_command_center(client, seeded, admin_headers):
     H = admin_headers
     r = await client.get("/api/analytics/command-center", headers=H)
     body = r.json()
-    assert "kpis" in body and "live_inputs" in body and "outputs" in body
+    # New shape: real KPI measures + honest error map (no fake fallbacks)
+    assert "kpis" in body and "errors" in body and "generated_at" in body
+    assert "orders" in body["kpis"] and "automation" in body["kpis"]
+    assert body["kpis"]["pending_approvals"] >= 0
     r = await client.get("/api/analytics/departments", headers=H)
     assert len(r.json()["departments"]) >= 8

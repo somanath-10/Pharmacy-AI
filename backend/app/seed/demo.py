@@ -1,7 +1,6 @@
 """Rich demo dataset: executes REAL workflows through the service layer so the
 Command Center, queues, ledgers and timelines are populated with meaningful,
 internally-consistent data."""
-import asyncio
 from datetime import timedelta
 
 from app.core.database import db, now_iso, utcnow
@@ -17,7 +16,6 @@ async def seed_demo():
     reverse = reverse_svc
     compliance = compliance_svc
     pharmacy = pharmacy_svc
-    from app.domains.inventory import service as inv
 
     sys_actor = {"type": "SYSTEM", "id": "seed"}
     agent = {"type": "AGENT", "id": "seed-agent"}
@@ -51,8 +49,6 @@ async def seed_demo():
     api_para = await db.db.products.find_one({"name": "Paracetamol API"})
     acme = await db.db.vendors.find_one({"code": "ACME"})
     globallabs = await db.db.vendors.find_one({"code": "GLOBALLABS"})
-    citycare = await db.db.customers.find_one({"name": "CityCare Hospital"})
-    medplus = await db.db.customers.find_one({"name": "MedPlus Distributors"})
     wellness = await db.db.customers.find_one({"name": "Wellness Pharmacy Chain"})
 
     # ---------------------------------------------------------- 1. Vendor lifecycle
@@ -116,7 +112,7 @@ async def seed_demo():
         "lines": [{"sku": fg_para["sku"], "quantity": 500},
                   {"sku": (await db.db.products.find_one(
                       {"name": "ORS Sachet"}))["sku"], "quantity": 300}],
-    }, sales_actor, idempotency_key=f"demo-so1")
+    }, sales_actor, idempotency_key="demo-so1")
     await sales_svc.confirm_order(so1["order_id"], sales_actor)
 
     # ---------------------------------------------------------- 4. Sourcing → contract
@@ -140,7 +136,7 @@ async def seed_demo():
         "bid_id": (await sourcing_svc.list_bids(rfq["event_id"]))[0]["bid_id"]},
         buyer)
     await sourcing_svc.approve_award(bra["rec_id"], buyer, "Best combined score")
-    contract = await sourcing_svc.create_contract(rfq["event_id"], {
+    await sourcing_svc.create_contract(rfq["event_id"], {
         "vendor_id": acme["vendor_id"], "type": "BPA",
         "title": "Paracetamol API BPA",
         "valid_to": (utcnow() + timedelta(days=365)).strftime("%Y-%m-%d"),
@@ -245,7 +241,6 @@ async def seed_demo():
         "total_amount": 145000.0,
         "lines": [{"line_no": 1, "quantity": 1000, "unit_price": 145,
                    "amount": 145000}]}, finance_actor)
-    match2 = await finance.match_invoice(inv2["invoice_id"], finance_actor)
     # Finance agent requested credit note; supplier sends it:
     await finance.apply_credit_note(inv2["invoice_id"], {
         "amount": 4350.0, "reason": "QA rejected 30 units"}, finance_actor)
@@ -271,11 +266,8 @@ async def seed_demo():
         "name": "weight_variation", "result": 2.1, "verdict": "PASS"}, sys_actor)
     await production.complete_production(mpo["order_id"], 992, sys_actor)
     await production.submit_for_qc(mpo["order_id"], sys_actor)
-    order = await production.get_order(mpo["order_id"])
-    fg_sample = None
     async for s in db.db.qc_samples.find({"ref_type": "PRODUCTION_ORDER",
                                           "ref_id": mpo["order_id"]}):
-        fg_sample = s
         await qc_svc.start_testing(s["sample_id"], qc_actor)
         await qc_svc.enter_results(s["sample_id"], [
             {"name": "description", "result": "White round tablets"},
@@ -357,7 +349,7 @@ async def seed_demo():
     await reverse.dispose_return(ret["return_id"], "RESTOCK", qa_actor)
 
     # recall drill on one batch (kept open for demo)
-    recall = await reverse.create_recall({
+    await reverse.create_recall({
         "product_id": fg_azi["sku"], "batch_ids": ["B-GL-0201"],
         "reason": "Market complaint: discoloration", "class": "CLASS_III"},
         qa_actor, idempotency_key="demo-recall")

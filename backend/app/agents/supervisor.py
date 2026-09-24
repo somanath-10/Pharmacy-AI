@@ -6,8 +6,7 @@ attempts autonomous resolution, escalates what remains — feeding the Human
 Decision Queue and the AI Command Center.
 """
 import logging
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from app.core.audit import audit
 from app.core.database import db, now_iso
@@ -38,6 +37,13 @@ async def tick(max_work: int = 50) -> dict:
     expired = await _expire_approvals()
     if expired:
         results["actions"].append({"action": "EXPIRE_APPROVALS", "count": expired})
+
+    # 1b. Orphaned agent tool calls stuck RUNNING → FAILED (ObjectId bug class)
+    from app.agents.gateway import reap_stale_running
+
+    reaped = await reap_stale_running()
+    if reaped:
+        results["actions"].append({"action": "REAP_AGENT_CALLS", "count": reaped})
 
     # 2. Retry failed outbox events
     from app.core.events import bus

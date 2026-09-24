@@ -39,14 +39,20 @@ async def report_adverse_event(payload: dict, actor: Optional[dict] = None) -> d
         "seriousness_criteria": [c for c in payload.get("seriousness_criteria", [])
                                  if c in SERIOUS_CRITERIA],
         "case_id": None,
+        "complaint_id": payload.get("complaint_id"),
         "created_at": now_iso(),
     }
     await db.db.adverse_events.insert_one(doc)
     # auto-create safety case
     case = await create_case_from_ae(ae_id, actor)
     doc["case_id"] = case["case_id"]
-    await db.db.adverse_events.update_one({"ae_id": ae_id},
-                                          {"$set": {"case_id": case["case_id"]}})
+    update = {"case_id": case["case_id"]}
+    if doc["complaint_id"]:
+        update["complaint_id"] = doc["complaint_id"]
+        await db.db.safety_cases.update_one(
+            {"case_id": case["case_id"]}, {"$set": {"complaint_id":
+                                                    doc["complaint_id"]}})
+    await db.db.adverse_events.update_one({"ae_id": ae_id}, {"$set": update})
     await bus.publish("adverse_event.received",
                       {"ae_id": ae_id, "case_id": case["case_id"],
                        "serious": bool(doc["seriousness_criteria"])}, actor)
@@ -78,7 +84,7 @@ async def create_case_from_ae(ae_id: str, actor: Optional[dict]) -> dict:
 
 
 async def triage_case(case_id: str, actor: dict) -> dict:
-    case = await _get_case(case_id)
+    await _get_case(case_id)
     ae = await db.db.adverse_events.find_one({"case_id": case_id})
     serious = bool((ae or {}).get("seriousness_criteria"))
     await db.db.safety_cases.update_one(
@@ -93,7 +99,7 @@ async def triage_case(case_id: str, actor: dict) -> dict:
 
 async def duplicate_check(case_id: str, actor: dict) -> dict:
     """Deterministic duplicate detection (patient+product+reaction)."""
-    case = await _get_case(case_id)
+    await _get_case(case_id)
     ae = await db.db.adverse_events.find_one({"case_id": case_id})
     dup = None
     if ae:
@@ -236,3 +242,14 @@ async def list_cases(status: Optional[str] = None) -> List[dict]:
     q = {} if not status else {"status": status}
     return [_clean(dict(r)) async for r in
             db.db.safety_cases.find(q).sort("created_at", -1).limit(200)]
+
+
+async def list_signals() -> List[dict]:
+    return [_clean(dict(s)) async for s in
+            db.db.safety_signals.find({}).sort("created_at", -1).limit(100)]
+
+
+async def followup_queue() -> List[dict]:
+    """Open cases requiring follow-up (PV agent queue is read-only over this)."""
+    return [_clean(dict(c)) async for c in db.db.safety_cases.find(
+        {"status": {"$nin": ["CLOSED"]}}).sort("created_at", -1).limit(100)]

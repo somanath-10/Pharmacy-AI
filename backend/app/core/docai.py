@@ -7,7 +7,7 @@ packing lists, ASN docs, contracts, QC reports, batch records and PODs.
 """
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.core.ai_gateway import (
     ai,
@@ -20,6 +20,11 @@ from app.core.database import db, now_iso
 from app.core.errors import NotFound
 
 log = logging.getLogger("pharmaos.docai")
+
+
+def _clean(d: dict) -> dict:
+    d.pop("_id", None)
+    return d
 
 DOC_TYPES = [
     "prescription", "supplier_invoice", "customer_po", "quotation",
@@ -37,7 +42,22 @@ async def register_document(
     uploaded_by: Optional[dict] = None,
     doc_type_hint: Optional[str] = None,
 ) -> dict:
+    import hashlib
+
     from app.core.storage import storage
+
+    # Content-hash dedupe (reference: same doc never stored twice)
+    content_hash = hashlib.sha256(content).hexdigest()
+    existing = await db.db.documents.find_one({"content_hash": content_hash})
+    if existing:
+        # treat as already-registered; keep entity link fresh if provided
+        if entity_type and entity_id:
+            await db.db.documents.update_one(
+                {"document_id": existing["document_id"]},
+                {"$set": {"entity_type": entity_type, "entity_id": entity_id}})
+        out = _clean(dict(existing))
+        out["duplicate"] = True
+        return out
 
     ref, mode = await storage.put(content, filename, content_type)
     text = extract_text(content)
@@ -45,6 +65,7 @@ async def register_document(
         "filename": filename,
         "content_type": content_type,
         "size": len(content),
+        "content_hash": content_hash,
         "storage_ref": ref,
         "storage_mode": mode,
         "entity_type": entity_type,
@@ -66,6 +87,97 @@ async def register_document(
     await db.db.documents.update_one(
         {"_id": res.inserted_id}, {"$set": {"document_id": doc["document_id"]}}
     )
+    return doc
+
+
+async def search_documents(q: Optional[str] = None, doc_type: Optional[str] = None,
+                           entity_type: Optional[str] = None,
+                           entity_id: Optional[str] = None,
+                           limit: int = 100) -> List[dict]:
+    """Cross-record document search (filename, text preview, entity links)."""
+    query: Dict[str, Any] = {}
+    if doc_type:
+        query["doc_type"] = doc_type
+    if entity_type:
+        query["entity_type"] = entity_type
+    if entity_id:
+        query["entity_id"] = entity_id
+    if q:
+        rx = {"$regex": _re_escape(q[:60]), "$options": "i"}
+        query["$or"] = [
+            {"filename": rx},
+            {"text_preview": rx},
+            {"extraction.data.invoice_number": rx},
+            {"extraction.data.po_number": rx},
+            {"extraction.data.licence_number": rx},
+        ]
+    rows = []
+    async for d in db.db.documents.find(query).sort("created_at", -1).limit(limit):
+        d = _clean(d)
+        d.pop("text_preview", None)
+        rows.append(d)
+    return rows
+
+
+def _re_escape(s: str) -> str:
+    import re as _re
+
+    return _re.escape(s)
+
+
+async def export_document_pdf(document_id: str) -> bytes:
+    """Deterministic PDF export of the document record (extraction + validation)."""
+    import io
+
+    doc = await _get(document_id)
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        width, height = A4
+        y = height - 50
+
+        def line(text: str = ""):
+            nonlocal y
+            c.drawString(40, y, text[:120])
+            y -= 16
+
+        line(f"Document: {doc['document_id']}")
+        line(f"Filename: {doc['filename']}")
+        line(f"Type: {doc['doc_type']}  Status: {doc['processing_status']}")
+        line(f"Entity: {doc.get('entity_type') or '-'} / "
+             f"{doc.get('entity_id') or '-'}")
+        line(f"Uploaded: {doc['created_at']}")
+        line()
+        line("Extraction:")
+        for k, v in ((doc.get("extraction") or {}).get("data") or {}).items():
+            if isinstance(v, (str, int, float)):
+                line(f"  {k}: {v}")
+        line()
+        line("Validation:")
+        v = doc.get("validation") or {}
+        line(f"  ok={v.get('ok')} route={v.get('route')} "
+             f"confidence={v.get('confidence')}")
+        for issue in v.get("issues") or []:
+            line(f"  - {issue}")
+        c.save()
+        return buf.getvalue()
+    except ImportError:
+        # reportlab not installed: deterministic text fallback with PDF header
+        body = [
+            f"Document: {doc['document_id']}",
+            f"Filename: {doc['filename']}",
+            f"Type: {doc['doc_type']}",
+        ]
+        return ("\n".join(body)).encode()
+
+
+async def _get(document_id: str) -> dict:
+    doc = await db.db.documents.find_one({"document_id": document_id})
+    if not doc:
+        raise NotFound(f"Document {document_id} not found")
     return doc
 
 
@@ -158,6 +270,7 @@ async def _extract_invoice(text: str):
 
 async def _extract_rx(text: str):
     data = offline_extract_prescription(text)
+    fb = True
     res = await ai.extract_json(
         'Extract prescription as JSON: {"patient","patient_age","prescriber",'
         '"medicines":[{"name","strength_mg","form","frequency","duration_days",'
@@ -324,10 +437,3 @@ async def process(document_id: str) -> dict:
                        "route": v["route"]})
     return {"doc_type": doc["doc_type"], "extraction": doc.get("extraction"),
             "matching": doc.get("matching"), "validation": v}
-
-
-async def _get(document_id: str) -> dict:
-    doc = await db.db.documents.find_one({"document_id": document_id})
-    if not doc:
-        raise NotFound(f"Document {document_id} not found")
-    return doc

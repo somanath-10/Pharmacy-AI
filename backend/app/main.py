@@ -1,6 +1,5 @@
 """Pharma AI OS — FastAPI application assembly."""
 import logging
-import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -24,12 +23,6 @@ async def lifespan(app: FastAPI):
     from app.core.storage import storage
 
     await storage.init()
-
-    # register all agent tools (imports register decorated tools)
-    from app.agents import domain_agents  # noqa: F401
-
-    # register all Human Decision Queue approval callbacks
-    from app.core import approvals_callbacks  # noqa: F401
 
     # start transactional-outbox pump
     from app.core.events import bus
@@ -70,6 +63,39 @@ app.add_middleware(
 
 register_handlers(app)
 
+# ---- security middleware: security headers + global rate limit
+from app.core.security import rate_limit as _rate_limit
+
+@app.middleware("http")
+async def security_headers_and_rate_limit(request, call_next):
+    # Skip rate limit for health/metrics
+    if request.url.path in ("/health", "/health/ready", "/metrics"):
+        response = await call_next(request)
+    else:
+        # Global API rate limit (per-IP)
+        client_ip = request.client.host if request.client else "unknown"
+        allowed = await _rate_limit("api", client_ip, settings.RATE_LIMIT_API_PER_MIN)
+        if not allowed:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded"},
+                headers={"Retry-After": "60"},
+            )
+        response = await call_next(request)
+
+    # Security headers
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if settings.ENV in {"production", "staging"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        response.headers.setdefault("Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+    return response
+
 # ---- routers
 from app.api.routes_analytics import router as analytics_router  # noqa: E402
 from app.api.routes_auth import router as auth_router  # noqa: E402
@@ -102,6 +128,23 @@ from app.api.routes_supply import (  # noqa: E402
     warehouse_router,
 )
 
+# register all agent tools at import time — the agent registry must be
+# populated whenever this module loads (uvicorn, ASGITransport tests, probes),
+# not only after lifespan starts. Side-effect import.
+from app.agents import domain_agents
+
+# register all Human Decision Queue approval callbacks
+from app.core import approvals_callbacks
+
+# silence unused import warnings (side-effect imports)
+_ = domain_agents
+_ = approvals_callbacks
+
+# fail fast if an agent's monitoring map references an unregistered tool
+from app.api.routes_finance import assert_monitoring_tools_registered  # noqa: E402
+
+assert_monitoring_tools_registered()
+
 for r in [auth_router, users_router, masters_router, analytics_router,
           crm_router, sales_router, planning_router, vendors_router,
           portal_router, sourcing_router, procurement_router, logistics_router,
@@ -126,10 +169,13 @@ async def ready():
         mongo = f"down: {e}"
     from app.core.redis_client import cache
 
+    # Honest topology reporting: tx claims only when multi-document
+    # transactions are actually supported (replica set / sharded).
+    topology = db.topology_info()
     return {"status": "ready" if mongo == "up" else "degraded",
             "mongo": mongo, "redis": "up" if cache.is_redis else "fallback",
             "storage": "auto", "ai": "openai" if settings.OPENAI_API_KEY
-            else "offline-fallback"}
+            else "offline-fallback", "transactions": topology}
 
 
 @app.get("/metrics")
@@ -200,6 +246,11 @@ async def log_requests(request, call_next):
     import time
     import uuid
 
+    from app.core.audit import new_correlation_id
+
+    # Correlation ID: one business thread traced across audit + events (Part 8)
+    request.state.correlation_id = request.headers.get(
+        "x-correlation-id") or new_correlation_id()
     request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
     # Idempotency-Key header → available to domain services as request.state.idem_key
     idem = request.headers.get("idempotency-key")
@@ -211,8 +262,10 @@ async def log_requests(request, call_next):
     log.info(json_fmt({
         "request_id": request_id, "method": request.method,
         "path": request.url.path, "status": response.status_code,
+        "correlation_id": request.state.correlation_id,
         "ms": dur}))
     response.headers["x-request-id"] = request_id
+    response.headers["x-correlation-id"] = request.state.correlation_id
     return response
 
 

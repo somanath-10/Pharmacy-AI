@@ -3,7 +3,6 @@ allocation (FEFO), pick/pack hooks, invoicing, POS, partial shipments."""
 from typing import Any, Dict, List, Optional
 
 from app.core.audit import audit
-from app.core.config import settings
 from app.core.database import db, now_iso
 from app.core.errors import ConflictError, NotFound, ValidationFailed
 from app.core.events import bus
@@ -210,6 +209,9 @@ async def create_sales_order(payload: dict, actor: dict,
         await db.db.sales_orders.insert_one(doc)
         await audit("SALES_ORDER", order_id, "CREATED", actor, new_state=initial)
         result = _clean(doc)
+        gate.store(result)  # persist for idempotent replay (BUG: was only
+                            # stored on the cpo_id branch, leaving the key
+                            # incomplete and duplicates unprotected)
 
     if payload.get("cpo_id"):
         await db.db.customer_pos.update_one(
@@ -217,7 +219,6 @@ async def create_sales_order(payload: dict, actor: dict,
             {"$set": {"sales_order_id": order_id, "status": "CONVERTED"}})
         await record_node("sales_order", order_id, "po_intake",
                           "Customer PO (Doc AI)", "DONE", actor)
-        gate.store(result)
     return result
 
 
@@ -314,11 +315,17 @@ async def allocate_order(order_id: str, actor: dict) -> dict:
 
 async def mark_shipped(order_id: str, shipment_id: str, actor: dict) -> dict:
     so = await _get_order(order_id)
-    if so["status"] not in ("PACKED", "DISPATCHED"):
+    if so["status"] in ("PACKED", "DISPATCHED"):
+        if so["status"] == "PACKED":
+            await transition("sales_order", order_id, "sales_orders", "order_id",
+                             "DISPATCHED", actor, reason=f"Shipment {shipment_id}")
+    elif so["status"] == "PICKING":
+        # partial/split-shipment path: the first dispatch moves PICKING -> PACKED
+        # only when every line is fully shipped; otherwise remain PICKING and
+        # let record_fulfillment track line progress
+        pass
+    else:
         raise ConflictError(f"Order not shippable: {so['status']}")
-    if so["status"] == "PACKED":
-        await transition("sales_order", order_id, "sales_orders", "order_id",
-                         "DISPATCHED", actor, reason=f"Shipment {shipment_id}")
     await db.db.sales_orders.update_one(
         {"order_id": order_id},
         {"$push": {"shipments": shipment_id}})
@@ -440,6 +447,7 @@ async def pos_sale(payload: dict, actor: dict,
         await audit("POS_SALE", order_id, "COMPLETED", actor,
                     details={"total": doc["total_amount"]})
         result = _clean(doc)
+        gate.store(result)
     return result
 
 
@@ -470,3 +478,179 @@ async def _get_quote(quote_id: str) -> dict:
     if not doc:
         raise NotFound(f"Quotation {quote_id} not found")
     return doc
+
+
+# ==================================================================
+# Phase: OMS completion — partial allocation, backorders, split
+# shipment, cancellation, pricing guard.
+# ==================================================================
+async def allocate_order_partial(order_id: str, actor: dict) -> dict:
+    """Partial-friendly FEFO allocation.
+
+    Fully-supplied lines → reserved now. Short lines → BACKORDER flag on the
+    line and a backorder record; the order proceeds to PICKING with what it
+    has (split shipment ready) instead of hard-failing the whole order.
+    """
+    so = await _get_order(order_id)
+    if so["status"] != "CONFIRMED":
+        raise ConflictError(f"Order not CONFIRMED: {so['status']}")
+    allocations, backorders = [], []
+    _ = False
+    for line in so["lines"]:
+        plan = await inventory.fefo_batches(line["sku"], so.get("warehouse_id"),
+                                            line["quantity"])
+        safe_plan = []
+        for p in plan:
+            if p["batch_id"] == "UNBATCHED":
+                safe_plan.append(p)
+                continue
+            b = await db.db.batches.find_one({"batch_id": p["batch_id"]})
+            if b and b.get("qa_status") == "RELEASED" and not b.get("blocked"):
+                safe_plan.append(p)
+        have = sum(p["allocate"] for p in safe_plan)
+        need = float(line["quantity"])
+        if have >= need:
+            await inventory.reserve(line["sku"], need, "SALES_ORDER",
+                                    order_id, so.get("warehouse_id"), actor)
+            allocations.extend(safe_plan)
+            _ = True
+        else:
+            if have > 0:
+                await inventory.reserve(line["sku"], have, "SALES_ORDER",
+                                        order_id, so.get("warehouse_id"), actor)
+                allocations.extend(safe_plan)
+                _ = True
+            backorders.append({"sku": line["sku"],
+                               "short_qty": round(need - have, 3),
+                               "uom": line.get("uom", "BOX")})
+            line["backorder_qty"] = round(need - have, 3)
+    setd = {"lines": so["lines"], "updated_at": now_iso()}
+    upd = {"$set": setd}
+    if backorders:
+        upd["$push"] = {"backorders": {"$each": backorders}}
+    await db.db.sales_orders.update_one({"order_id": order_id}, upd)
+    await transition("sales_order", order_id, "sales_orders", "order_id",
+                     "ALLOCATED", actor,
+                     reason="Partial allocation (backorder lines flagged)"
+                            if backorders else "FEFO allocation complete")
+    if backorders:
+        await bus.publish("sales_order.backordered",
+                          {"order_id": order_id, "backorders": backorders}, actor)
+        await audit("SALES_ORDER", order_id, "BACKORDERED", actor,
+                    details={"lines": len(backorders)})
+    return {"order_id": order_id, "allocations": allocations,
+            "backorders": backorders, "partial": bool(backorders)}
+
+
+async def record_fulfillment(order_id: str, shipped: dict, actor: dict) -> dict:
+    """Ship a quantity against one or more lines (partial / split shipment).
+
+    shipped = {"lines": [{"sku":..., "qty":...}], "shipment_id": "SHP-..."}.
+    When every line reaches its full quantity the order transitions to
+    DISPATCHED; otherwise it stays PICKING awaiting the next shipment.
+    """
+    so = await _get_order(order_id)
+    if so["status"] not in ("ALLOCATED", "PICKING"):
+        raise ConflictError(f"Order not shippable: {so['status']}")
+    if so["status"] == "ALLOCATED":
+        await transition("sales_order", order_id, "sales_orders", "order_id",
+                         "PICKING", actor, reason="First fulfillment shipment")
+    lines = so["lines"]
+    for sl in shipped.get("lines", []):
+        target = next((l for l in lines if l["sku"] == sl["sku"]), None)
+        if not target:
+            raise NotFound(f"Line {sl['sku']} not on order")
+        ship_qty = float(sl["qty"])
+        already = float(target.get("shipped_qty") or 0)
+        if ship_qty <= 0:
+            raise ValidationFailed("Ship quantity must be positive")
+        if already + ship_qty > float(target["quantity"]) + 1e-9:
+            raise ValidationFailed(
+                f"Shipment {sl['sku']}: {already + ship_qty} exceeds ordered "
+                f"{target['quantity']}")
+        target["shipped_qty"] = already + ship_qty
+    complete = all(float(l.get("shipped_qty") or 0) >=
+                   float(l["quantity"]) - 1e-9 for l in lines)
+    await db.db.sales_orders.update_one(
+        {"order_id": order_id},
+        {"$set": {"lines": lines},
+         "$push": {"shipments": shipped.get("shipment_id")}})
+    await _ebmr_like_node(order_id, "SHIPMENT_RECORDED",
+                          {"shipment": shipped.get("shipment_id"),
+                           "complete": complete}, actor)
+    if complete:
+        # walk the machine: PICKING -> PACKED -> DISPATCHED (workflow-valid)
+        cur = (await _get_order(order_id))["status"]
+        if cur == "PICKING":
+            await transition("sales_order", order_id, "sales_orders", "order_id",
+                             "PACKED", actor, reason="All lines shipped")
+        await transition("sales_order", order_id, "sales_orders", "order_id",
+                         "DISPATCHED", actor,
+                         reason=f"Fully shipped via {shipped.get('shipment_id')}")
+    return await _get_order(order_id)
+
+
+async def _ebmr_like_node(order_id: str, node: str, data: dict, actor: dict):
+    await record_node("sales_order", order_id, node, str(data), actor)
+
+
+async def cancel_order(order_id: str, reason: str, actor: dict) -> dict:
+    """Cancel + release any ACTIVE reservations (no orphaned stock holds)."""
+    so = await _get_order(order_id)
+    if so["status"] in ("CANCELLED", "CLOSED"):
+        raise ConflictError(f"Order already {so['status']}")
+    released = await inventory.release_reservation("SALES_ORDER", order_id,
+                                                   actor=actor)
+    await transition("sales_order", order_id, "sales_orders", "order_id",
+                     "CANCELLED", actor, reason=reason)
+    await bus.publish("sales_order.cancelled",
+                      {"order_id": order_id, "reservations_released": released},
+                      actor)
+    await audit("SALES_ORDER", order_id, "CANCELLED", actor, reason=reason,
+                details={"reservations_released": released})
+    return await _get_order(order_id)
+
+
+async def quotation_from_rfq(inq_id: str, actor: dict,
+                             discount_pct: float = 0.0) -> dict:
+    """Inquiry/RFQ → quotation, carrying lines from the understanding."""
+    inq = await db.db.inquiries.find_one({"inq_id": inq_id})
+    if not inq:
+        raise NotFound(f"Inquiry {inq_id} not found")
+    if not inq.get("customer_id"):
+        raise ValidationFailed("Inquiry has no customer — cannot quote")
+    lines = (inq.get("understanding") or {}).get("lines") or inq.get("lines") or []
+    if not lines:
+        raise ValidationFailed("Inquiry has no understood lines to quote")
+    from app.domains.masters.service import get_price
+
+    qlines, subtotal = [], 0.0
+    for l in lines:
+        sku = l.get("sku") or l.get("product_id")
+        qty = float(l.get("quantity") or 0)
+        prod = await db.db.products.find_one({"sku": sku})
+        if not prod:
+            raise NotFound(f"Product {sku} not found")
+        price = await get_price(sku, "STANDARD") or prod.get("mrp") or 0
+        amt = round(qty * float(price), 2)
+        qlines.append({"sku": sku, "quantity": qty,
+                       "uom": l.get("uom", prod.get("uom", "BOX")),
+                       "unit_price": float(price), "amount": amt})
+        subtotal += amt
+    quote = await create_quotation({
+        "customer_id": inq["customer_id"], "inquiry_id": inq_id,
+        "lines": qlines, "discount_pct": discount_pct,
+    }, actor)
+    if discount_pct:
+        total = round(subtotal * (1 - float(discount_pct) / 100), 2)
+        await db.db.quotations.update_one(
+            {"quote_id": quote["quote_id"]},
+            {"$set": {"total_amount": total, "subtotal": round(subtotal, 2)}})
+        quote["total_amount"] = total
+    await db.db.inquiries.update_one(
+        {"inq_id": inq_id},
+        {"$set": {"quote_id": quote["quote_id"], "status": "QUOTED",
+                  "updated_at": now_iso()}})
+    await bus.publish("sales.quotation_created_from_rfq",
+                      {"inq_id": inq_id, "quote_id": quote["quote_id"]}, actor)
+    return quote

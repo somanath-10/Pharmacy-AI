@@ -9,11 +9,13 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from app.core.audit import audit
 from app.core.database import db, now_iso
-from app.core.errors import DomainError, PermissionDenied, PolicyViolation
+from app.core.errors import DomainError, PermissionDenied
+from app.core.events import bus
 
 log = logging.getLogger("pharmaos.agents")
 
@@ -42,7 +44,8 @@ def agent_tool(domain: str, name: str, requires_approval_over: Optional[float] =
     def decorator(fn: Callable):
         @functools.wraps(fn)
         async def wrapper(agent_id: str, payload: Dict[str, Any],
-                          actor: Optional[dict] = None) -> Any:
+                          actor: Optional[dict] = None,
+                          meta: Optional[Dict[str, Any]] = None) -> Any:
             started = time.time()
             reg = AGENT_REGISTRY.get(agent_id)
             if not reg:
@@ -65,10 +68,17 @@ def agent_tool(domain: str, name: str, requires_approval_over: Optional[float] =
                 "args_preview": {k: str(v)[:100] for k, v in
                                  list(payload.items())[:8]},
                 "status": "RUNNING",
+                # Part 9 metadata: why the agent acted, with what model and
+                # how confident; escalation_reason set when routed to human.
+                "reason": (meta or {}).get("reason"),
+                "confidence": (meta or {}).get("confidence"),
+                "model": (meta or {}).get("model"),
+                "escalation_reason": (meta or {}).get("escalation_reason"),
                 "created_at": now_iso(),
             }
             res = await db.db.agent_tool_calls.insert_one(call_doc)
             call_id = str(res.inserted_id)
+            call_doc["call_id"] = call_id  # stable string handle for updates
 
             try:
                 # Approval gate: large financial actions require the queue
@@ -110,8 +120,14 @@ def agent_tool(domain: str, name: str, requires_approval_over: Optional[float] =
 
 async def _finish_call(call_id: str, status: str, started: float,
                        result_preview: Any = None, error: str = None):
+    # call_id is the string form of the inserted ObjectId — query via _id with
+    # a real ObjectId. A raw string here never matches, leaving the row stuck
+    # in RUNNING forever.
+    from bson import ObjectId
+
+    q = {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"call_id": call_id}
     await db.db.agent_tool_calls.update_one(
-        {"_id": call_id},
+        q,
         {"$set": {"status": status,
                   "result_preview": result_preview,
                   "error": error,
@@ -164,12 +180,54 @@ async def list_agents() -> list:
 
 
 async def agent_status(agent_id: str) -> dict:
+    """Full agent health snapshot: registry state + live call statistics."""
     reg = AGENT_REGISTRY.get(agent_id)
     if not reg:
         raise DomainError(f"Unknown agent {agent_id}")
     calls = await db.db.agent_tool_calls.count_documents({"agent": agent_id})
     failed = await db.db.agent_tool_calls.count_documents({"agent": agent_id,
                                                            "status": "FAILED"})
+    running = await db.db.agent_tool_calls.count_documents(
+        {"agent": agent_id, "status": "RUNNING"})
     return {**{k: v for k, v in reg.items() if k != "allowed_tools"},
             "total_tool_calls": calls, "failed_calls": failed,
+            "running_calls": running,
             "allowed_tools": sorted(reg["allowed_tools"])}
+
+
+async def set_agent_status(agent_id: str, status: str, actor: dict,
+                           reason: str = "") -> dict:
+    """Kill-switch: disable/pause/re-enable an agent at runtime.
+
+    Disabled agents fail every tool call with PermissionDenied (checked in the
+    gateway wrapper). The action itself is audited for the compliance trail.
+    """
+    if status not in {"ACTIVE", "DISABLED", "PAUSED"}:
+        raise DomainError(f"Invalid agent status {status}")
+    reg = AGENT_REGISTRY.get(agent_id)
+    if not reg:
+        raise DomainError(f"Unknown agent {agent_id}")
+    previous = reg["status"]
+    reg["status"] = status
+    await audit("AGENT", agent_id, "STATUS_CHANGE", actor,
+                previous_state=previous, new_state=status, reason=reason)
+    await bus.publish("agent.status_changed",
+                      {"agent_id": agent_id, "previous": previous,
+                       "status": status, "reason": reason}, actor)
+    return {"agent_id": agent_id, "status": status, "previous": previous}
+
+
+async def reap_stale_running(max_age_minutes: int = 15) -> int:
+    """Recover tool calls orphaned in RUNNING (process crash / missed finish).
+
+    Such rows are terminal-ambiguous; mark them FAILED so nothing is stuck.
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(minutes=max_age_minutes)).isoformat()
+    res = await db.db.agent_tool_calls.update_many(
+        {"status": "RUNNING", "created_at": {"$lt": cutoff}},
+        {"$set": {"status": "FAILED",
+                  "error": "reaped: orphaned RUNNING call"}})
+    return res.modified_count

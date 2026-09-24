@@ -7,9 +7,9 @@ name. Events are also mirrored into `events` for the activity stream.
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from app.core.database import db, now_iso
+from app.core.database import db, now_iso, utcnow
 
 log = logging.getLogger("pharmaos.events")
 
@@ -64,18 +64,34 @@ class EventBus:
                 log.exception("handler failed event=%s handler=%s", name, handler.__name__)
 
     async def pump_once(self, limit: int = 200) -> int:
-        """Process pending outbox rows (idempotent handlers → at-least-once OK)."""
-        cur = (
-            db.db.outbox_events.find({"status": "PENDING"})
-            .sort("created_at", 1)
-            .limit(limit)
-        )
+        """Process pending outbox rows with atomic claiming.
+
+        Every claim is a find_and_modify: PROCESSING rows are invisible to
+        other workers, so two API processes can never double-dispatch the
+        same event (duplicate GRNs / payments / stock movements protection).
+        Stale claims (crashed worker) are reclaimed after 60s.
+        """
+        from datetime import timedelta
+
+        stale_cutoff = (utcnow() - timedelta(seconds=60)).isoformat()
         processed = 0
-        async for row in cur:
+        for _ in range(limit):
+            row = await db.db.outbox_events.find_one_and_update(
+                {"$or": [
+                    {"status": "PENDING"},
+                    {"status": "PROCESSING",
+                     "claimed_at": {"$lt": stale_cutoff}},
+                ]},
+                {"$set": {"status": "PROCESSING", "claimed_at": now_iso()}},
+                sort=[("created_at", 1)],
+            )
+            if not row:
+                break
             try:
-                await self._dispatch(row["name"], row["payload"], row.get("actor"))
+                await self._dispatch(row["name"], row["payload"],
+                                     row.get("actor"))
                 await db.db.outbox_events.update_one(
-                    {"_id": row["_id"]},
+                    {"_id": row["_id"], "status": "PROCESSING"},
                     {"$set": {"status": "DONE", "processed_at": now_iso()},
                      "$inc": {"attempts": 1}},
                 )

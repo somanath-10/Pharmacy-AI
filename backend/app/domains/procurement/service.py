@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.audit import audit
 from app.core.database import db, now_iso
-from app.core.errors import ConflictError, DomainError, NotFound, ValidationFailed
+from app.core.errors import ConflictError, NotFound, ValidationFailed
 from app.core.events import bus
 from app.core.idempotency import idempotent
 from app.core.policies import evaluate_po_approval, evaluate_pr_approval
@@ -51,6 +51,8 @@ async def create_pr(payload: dict, actor: dict, idempotency_key: Optional[str] =
             "timeline": [{"state": "DRAFT", "actor": actor, "at": now_iso()}],
         }
         await db.db.purchase_requisitions.insert_one(doc)
+        await bus.publish("pr.created", {"pr_id": pr_id,
+                                         "estimated_amount": estimated}, actor)
         await audit("PR", pr_id, "CREATED", actor, new_state="DRAFT")
         gate.store(_clean(doc))
         return _clean(doc)
@@ -163,6 +165,9 @@ async def create_po(payload: dict, actor: dict, idempotency_key: Optional[str] =
             "timeline": [{"state": "DRAFT", "actor": actor, "at": now_iso()}],
         }
         await db.db.purchase_orders.insert_one(doc)
+        await bus.publish("po.created", {"po_id": po_id,
+                                         "vendor_id": payload["vendor_id"],
+                                         "total_amount": doc["total_amount"]}, actor)
         await audit("PURCHASE_ORDER", po_id, "CREATED", actor, new_state="DRAFT")
         result = _clean(doc)
         gate.store(result)
@@ -208,6 +213,9 @@ async def submit_po_for_approval(po_id: str, actor: dict) -> dict:
 
 async def _approve_po(po_id: str, actor: dict, reason: str = "",
                       policy: Optional[str] = None) -> dict:
+    from app.core.rbac import enforce_sod
+
+    await enforce_sod(actor, "APPROVED", "PURCHASE_ORDER", po_id)
     await transition("purchase_order", po_id, "purchase_orders", "po_id",
                      "APPROVED", actor, reason=reason)
     await db.db.purchase_orders.update_one(
@@ -231,6 +239,8 @@ async def send_po(po_id: str, actor: dict) -> dict:
         raise ConflictError(f"PO not APPROVED: {po['status']}")
     await transition("purchase_order", po_id, "purchase_orders", "po_id",
                      "SENT", actor, reason="Transmitted to vendor")
+    await bus.publish("po.sent", {"po_id": po_id, "vendor_id": po["vendor_id"]},
+                      actor)
     vendor = await db.db.vendors.find_one({"vendor_id": po["vendor_id"]})
     from app.core.notifications import notify
 
@@ -244,18 +254,113 @@ async def send_po(po_id: str, actor: dict) -> dict:
 
 
 async def acknowledge_po(po_id: str, payload: dict, actor: dict) -> dict:
+    """Supplier acknowledgement — accept (→ ACKNOWLEDGED) or reject (stays SENT
+    with a rejection record so the buyer can amend/cancel)."""
     po = await _get_po(po_id)
     if po["status"] != "SENT":
         raise ConflictError(f"PO not SENT: {po['status']}")
-    ack = {"accepted": payload.get("accepted", True),
+    accepted = payload.get("accepted", True)
+    ack = {"accepted": accepted,
            "confirmed_delivery": payload.get("confirmed_delivery"),
            "comments": payload.get("comments"),
+           "rejection_reason": payload.get("rejection_reason"),
            "by": actor, "at": now_iso()}
-    await transition("purchase_order", po_id, "purchase_orders", "po_id",
-                     "ACKNOWLEDGED", actor, reason="Vendor acknowledged")
-    await db.db.purchase_orders.update_one({"po_id": po_id}, {"$set": {"ack": ack}})
-    await bus.publish("po.acknowledged", {"po_id": po_id}, actor)
+    if accepted:
+        await transition("purchase_order", po_id, "purchase_orders", "po_id",
+                         "ACKNOWLEDGED", actor, reason="Vendor acknowledged")
+        await db.db.purchase_orders.update_one({"po_id": po_id},
+                                               {"$set": {"ack": ack}})
+        await bus.publish("po.acknowledged", {"po_id": po_id}, actor)
+        return await _get_po(po_id)
+    await db.db.purchase_orders.update_one(
+        {"po_id": po_id}, {"$set": {"ack": ack, "updated_at": now_iso()}})
+    await bus.publish("po.ack_rejected", {"po_id": po_id,
+                                          "reason": ack["rejection_reason"]}, actor)
+    await audit("PURCHASE_ORDER", po_id, "ACK_REJECTED", actor,
+                reason=ack["rejection_reason"])
     return await _get_po(po_id)
+
+
+# ------------------------------------------------------------------ amendments
+async def amend_po(po_id: str, changes: dict, actor: dict,
+                   reason: str = "") -> dict:
+    """PO amendment: snapshot the current version into po_versions, apply line
+    changes (price/qty/date), recalc totals, keep DRAFT→re-approve if sent.
+
+    Allowed from DRAFT (buyer edit) and SENT/ACKNOWLEDGED/PARTIALLY_RECEIVED
+    (agreed amendment — creates a new version requiring re-approval)."""
+    po = await _get_po(po_id)
+    if po["status"] not in ("DRAFT", "SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"):
+        raise ConflictError(f"Amendment not allowed for PO status {po['status']}")
+    from app.core.idempotency import idempotent
+
+    async with idempotent("PO_AMEND", changes.get("amendment_id") or None) as gate:
+        if not gate["first_time"]:
+            return gate["result"]
+        amendment_id = await _next_id("amendment", "AMD")
+        version = int(po.get("version") or 1)
+        snapshot = {k: po.get(k) for k in ("lines", "subtotal", "tax_amount",
+                                           "total_amount", "needed_by",
+                                           "payment_terms")}
+        await db.db.po_versions.update_one(
+            {"po_id": po_id, "version": version},
+            {"$set": {**snapshot, "amended_by": actor,
+                      "amended_at": now_iso(), "amendment_id": amendment_id}},
+            upsert=True)
+
+        lines = po["lines"]
+        for ch in changes.get("lines", []):
+            for line in lines:
+                if line["line_no"] == ch.get("line_no"):
+                    if ch.get("quantity") is not None:
+                        line["quantity"] = float(ch["quantity"])
+                    if ch.get("unit_price") is not None:
+                        line["unit_price"] = float(ch["unit_price"])
+                    line["amount"] = round(float(line["quantity"])
+                                           * float(line["unit_price"]), 2)
+        subtotal = sum(l["amount"] for l in lines)
+        tax = sum(l["amount"] * l["tax_pct"] / 100 for l in lines)
+        update = {
+            "$set": {"lines": lines,
+                     "subtotal": round(subtotal, 2),
+                     "tax_amount": round(tax, 2),
+                     "total_amount": round(subtotal + tax, 2),
+                     "needed_by": changes.get("needed_by", po.get("needed_by")),
+                     "updated_at": now_iso()},
+            "$inc": {"version": 1},
+            "$push": {"timeline": {"state": f"AMENDED_v{version + 1}",
+                                   "previous_state": po["status"],
+                                   "actor": actor, "reason": reason or amendment_id,
+                                   "at": now_iso()}},
+        }
+        if po["status"] in ("SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"):
+            update["$set"]["status"] = "DRAFT"  # re-approval required
+        await db.db.purchase_orders.update_one({"po_id": po_id}, update)
+        await db.db.po_amendments.insert_one({
+            "amendment_id": amendment_id, "po_id": po_id,
+            "from_version": version, "to_version": version + 1,
+            "changes": changes, "reason": reason, "by": actor,
+            "created_at": now_iso()})
+        await audit("PURCHASE_ORDER", po_id, "AMENDED", actor,
+                    previous_state=po["status"],
+                    new_state="DRAFT" if po["status"] != "DRAFT" else "DRAFT",
+                    reason=reason,
+                    details={"amendment": amendment_id,
+                             "version": version + 1})
+        result = {**await _get_po(po_id), "amendment_id": amendment_id}
+        gate.store(result)
+    return result
+
+
+async def po_version_history(po_id: str) -> dict:
+    """Version history: amendments + stored version snapshots."""
+    po = await _get_po(po_id)
+    versions = [_clean(dict(v)) async for v in
+                db.db.po_versions.find({"po_id": po_id}).sort("version", 1)]
+    amendments = [_clean(dict(a)) async for a in
+                  db.db.po_amendments.find({"po_id": po_id}).sort("created_at", 1)]
+    return {"po_id": po_id, "current_version": po.get("version"),
+            "versions": versions, "amendments": amendments}
 
 
 async def receive_on_grn(po_id: str, received_lines: List[dict]) -> dict:
@@ -292,13 +397,25 @@ async def close_po(po_id: str, actor: dict, reason: str = "Completed") -> dict:
 
 async def resolve_sourcing_for_lines(skus: List[str]) -> Optional[dict]:
     """Interlink: source-to-contract → procurement. Find an ACTIVE contract/BPA
-    covering the SKUs, else the last approved vendor that supplied them."""
+    covering the SKUs, else the last approved vendor that supplied them.
+
+    When several contracts cover the same SKUs, the one with the lowest total
+    price for those lines wins — deterministic, not Mongo iteration order.
+    """
+    best = None  # (total_price_for_covered_lines, contract)
     async for c in db.db.contracts.find({"status": "ACTIVE",
                                          "type": {"$in": ["BPA", "CONTRACT"]}}):
-        covered = {p.get("product_id") for p in c.get("price_items", [])}
-        if covered & set(skus):
-            return {"vendor_id": c["vendor_id"], "contract_id": c["contract_id"],
-                    "source": "CONTRACT"}
+        prices = {p.get("product_id"): float(p.get("price") or 0)
+                  for p in c.get("price_items", [])}
+        covered = set(prices) & set(skus)
+        if covered:
+            total = sum(prices[s] for s in covered)
+            if best is None or total < best[0]:
+                best = (total, c)
+    if best:
+        c = best[1]
+        return {"vendor_id": c["vendor_id"], "contract_id": c["contract_id"],
+                "source": "CONTRACT"}
     last_grn = await db.db.grns.find_one(
         {"lines.sku": {"$in": skus}, "vendor_id": {"$exists": True, "$ne": None}},
         sort=[("created_at", -1)])

@@ -46,3 +46,49 @@ Services: `mongo` (replica set single-node), `redis`, `minio`, `api` (uvicorn wo
 - Mongo tx errors (standalone) → USE_TXNS=false degrades gracefully (single-doc atomicity).
 - OpenAI outage → offline deterministic fallback engaged automatically (flagged in responses).
 - Queue flooding → raise policy limits via policy_rules; categories page shows source domains.
+
+## Production phase additions (this release)
+
+### Backup & recovery — scripts/
+- `scripts/backup-mongo.sh [dir]` — nightly `mongodump --gzip --archive` of the
+  whole database (GridFS included) + tar of `uploads/`; 14-day retention
+  (`RETAIN_DAYS` overridable). Cron: `0 2 * * *`.
+- `scripts/restore-mongo.sh <archive>` — guarded restore (`--drop`), asks for
+  typed confirmation. After restore: `docker compose restart api` (rebuilds
+  indexes). Disaster-recovery order: provision host → restore latest archive →
+  restore `uploads/` tar → start stack → verify `/health/ready` + spot-check
+  audit trail. Rollback: keep the pre-upgrade archive; restore + redeploy the
+  previous image tag.
+
+### CI/CD — .github/workflows/ci.yml
+Backend (ruff lint, compile check, pytest against real Mongo/Redis services),
+frontend build, docker image builds for api + web, dependency audits
+(pip-audit / npm audit) and a naive secret scan. Deploy gates on all green.
+
+### Environments
+- `docker-compose.yml` — development (mongo, redis, api, web).
+- `docker-compose.prod.yml` — overlay: production env, no exposed mongo/redis
+  ports, no auto-seed, resource limits. Usage:
+  `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`
+- Staging: same overlay with `SEED_DEMO=1` once and staging secrets in `.env`.
+- Secrets only via `.env` / orchestrator secrets — never in images or repo.
+
+### Agent governance
+- `POST /api/agents/{agent_id}/status` — kill-switch (`DISABLED`/`PAUSED`/
+  `ACTIVE`), role-gated (SUPER_ADMIN/COMPLIANCE/MANAGEMENT), audited.
+- AI token/cost metering: every OpenAI call is recorded per model/day in
+  `ai_usage`; `GET /api/ai/usage` shows real spend.
+- `GET /api/finance/payments/anomalies` — duplicate payments, amount spikes,
+  repeated failures (deterministic).
+
+### Executive dashboard
+`GET /api/analytics/executive` + `/executive` page: all domains, AI governance
+(automation rate, agent fleet), and deterministic business risks.
+Advanced analytics: `/api/analytics/advanced/quality-trends`, `/plant-oee`,
+`/inventory-intelligence`.
+
+### Unique-index reconciliation (upgraded databases)
+On boot the API reconciles partial-unique indexes (dispenses per Rx, one
+customer invoice per SO, one supplier invoice per PO+number). Databases created
+before these indexes existed are repaired automatically (stale non-unique index
+dropped and recreated as unique) — duplicate protection is real, not assumed.
