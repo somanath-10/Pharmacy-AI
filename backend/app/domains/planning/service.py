@@ -23,6 +23,39 @@ async def _next_id(name: str, prefix: str) -> str:
     return f"{prefix}-{int(doc['seq']):05d}"
 
 
+async def create_planning_proposal(product_id: str, action: str, quantity: float,
+                                   plan: dict, actor: Optional[dict],
+                                   source: str = "AGENT") -> dict:
+    """Single governed entry point for creating a planning proposal (P0 6):
+    agents/supervisor call this instead of writing planning_proposals (a
+    business collection) or touching the counters directly."""
+    if action not in ("TRANSFER", "PRODUCE", "BUY"):
+        raise ValidationFailed(f"Invalid proposal action {action}")
+    existing = await db.db.planning_proposals.find_one(
+        {"product_id": product_id, "status": "PROPOSED"})
+    if existing:
+        return _clean(dict(existing))  # dedupe: one open proposal per product
+    prop = {
+        "proposal_id": await _next_id("proposal", "PROP"),
+        "product_id": product_id,
+        "action": action,
+        "quantity": quantity,
+        "options": plan.get("options", []),
+        "reason": plan.get("reason"),
+        "source": source,
+        "status": "PROPOSED",
+        "created_by": actor or {"type": "SYSTEM", "id": "planning"},
+        "created_at": now_iso(),
+    }
+    await db.db.planning_proposals.insert_one(prop)
+    await bus.publish(f"planning.{action.lower()}_proposed",
+                      {"proposal_id": prop["proposal_id"],
+                       "product_id": product_id, "quantity": quantity}, actor)
+    await audit("PLANNING_PROPOSAL", prop["proposal_id"], "CREATED", actor,
+                details={"action": action, "qty": quantity, "source": source})
+    return _clean(prop)
+
+
 async def record_demand_history(product_id: str, quantity: float,
                                 period: str, source: str = "SALES") -> dict:
     """Upsert monthly demand history used by the moving-average forecast."""

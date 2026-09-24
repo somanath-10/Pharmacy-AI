@@ -94,6 +94,26 @@ async def create_approval(
     return doc["approval_id"]
 
 
+async def expire_stale_approvals(actor: Optional[dict] = None) -> int:
+    """Expire overdue PENDING approvals (domain-owned; supervisor calls this
+    instead of writing the approvals collection directly)."""
+    now = now_iso()
+    rows = [{"approval_id": r["approval_id"]} async for r in
+            db.db.approvals.find({"status": "PENDING",
+                                  "due_at": {"$lt": now, "$ne": None}})]
+    for r in rows:
+        res = await db.db.approvals.update_one(
+            {"approval_id": r["approval_id"], "status": "PENDING"},
+            {"$set": {"status": "EXPIRED", "updated_at": now}})
+        if res.modified_count:
+            await bus.publish("approval.decided",
+                              {"approval_id": r["approval_id"],
+                               "decision": "EXPIRED"}, actor)
+            await audit("APPROVAL", r["approval_id"], "EXPIRED", actor,
+                        previous_state="PENDING", new_state="EXPIRED")
+    return len(rows)
+
+
 async def decide(
     approval_id: str,
     decision: str,

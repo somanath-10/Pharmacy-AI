@@ -76,22 +76,16 @@ async def tick(max_work: int = 50) -> dict:
 
 
 async def _expire_approvals() -> int:
-    now = now_iso()
-    rows = [{"approval_id": r["approval_id"]} async for r in
-            db.db.approvals.find({"status": "PENDING",
-                                  "due_at": {"$lt": now}})]
-    for r in rows:
-        await db.db.approvals.update_one(
-            {"approval_id": r["approval_id"]},
-            {"$set": {"status": "EXPIRED", "updated_at": now_iso()}})
-        await bus.publish("approval.decided",
-                          {"approval_id": r["approval_id"],
-                           "decision": "EXPIRED"})
-    return len(rows)
+    """Overdue approvals expire through the approvals domain function — the
+    supervisor never writes business collections directly (P0 6)."""
+    from app.core.approvals import expire_stale_approvals
+
+    return await expire_stale_approvals({"type": "AGENT", "id": AGENT_ID})
 
 
 async def _check_supplier_corrections() -> int:
-    """Credit notes applied by vendors resolve invoice exceptions."""
+    """Credit notes applied by vendors resolve invoice exceptions. agent_tasks
+    are agent-owned telemetry (allowed); the business check reads, never writes."""
     resolved = 0
     async for task in db.db.agent_tasks.find({"type": "SUPPLIER_CORRECTION_REQUEST",
                                               "status": "OPEN"}):
@@ -134,31 +128,15 @@ async def _scan_shortages(limit: int) -> int:
             except Exception:
                 continue
             if plan.get("action") in ("TRANSFER", "PRODUCE", "BUY"):
-                exists = await db.db.planning_proposals.find_one(
-                    {"product_id": sku, "status": "PROPOSED"})
-                if exists:
-                    continue
-                prop_id = await _next_proposal_id()
-                await db.db.planning_proposals.insert_one({
-                    "proposal_id": prop_id,
-                    "product_id": sku,
-                    "action": plan["action"],
-                    "quantity": plan["net_requirement"],
-                    "options": plan.get("options", []),
-                    "reason": plan["reason"],
-                    "source": "SUPERVISOR_SCAN",
-                    "status": "PROPOSED",
-                    "created_by": {"type": "AGENT", "id": AGENT_ID},
-                    "created_at": now_iso()})
-                created += 1
+                from app.domains.planning.service import create_planning_proposal
+
+                prop = await create_planning_proposal(
+                    sku, plan["action"], plan["net_requirement"], plan,
+                    {"type": "AGENT", "id": AGENT_ID},
+                    source="SUPERVISOR_SCAN")
+                if prop.get("created_at") and not prop.get("deduped"):
+                    created += 1
     return created
-
-
-async def _next_proposal_id() -> str:
-    doc = await db.db.counters.find_one_and_update(
-        {"name": "proposal"}, {"$inc": {"seq": 1}}, upsert=True,
-        return_document=True)
-    return f"PROP-{int(doc['seq']):05d}"
 
 
 async def self_resolve_problem(problem: Dict[str, Any]) -> dict:

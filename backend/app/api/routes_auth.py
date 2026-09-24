@@ -130,6 +130,12 @@ async def login(payload: LoginIn):
             await audit("AUTH", user["user_id"], "LOGIN_MFA_FAILED",
                         {"type": "ANONYMOUS", "id": email})
             raise HTTPException(401, "MFA code required or invalid")
+    if must_mfa and not user.get("mfa_secret"):
+        # Enrollment is mandatory for this role: no secret → no session.
+        # Issuing tokens here silently bypassed the entire MFA control.
+        await audit("AUTH", user["user_id"], "LOGIN_MFA_ENROLLMENT_REQUIRED",
+                    {"type": "ANONYMOUS", "id": email})
+        raise HTTPException(403, "MFA_ENROLLMENT_REQUIRED")
 
     if user.get("status") == "SUSPENDED":
         raise HTTPException(403, "Account suspended")
@@ -318,8 +324,9 @@ async def password_reset_request(payload: ResetRequestIn):
         await db.db.password_resets.insert_one({
             "email": email,
             "token_hash": token_fingerprint(token),
-            "expires_at": (datetime.now(timezone.utc)
-                           + timedelta(minutes=30)).isoformat(),
+            # BSON Date (not ISO string): Mongo TTL indexes only work on
+            # real date fields.
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=30),
             "used": False,
             "created_at": now_iso()})
         from app.core.notifications import notify
@@ -340,7 +347,7 @@ async def password_reset_confirm(payload: ResetConfirmIn):
     doc = await db.db.password_resets.find_one_and_update(
         {"email": email, "token_hash": token_fingerprint(payload.token),
          "used": False,
-         "expires_at": {"$gt": datetime.now(timezone.utc).isoformat()}},
+         "expires_at": {"$gt": datetime.now(timezone.utc)}},
         {"$set": {"used": True, "used_at": now_iso()}})
     if not doc:
         raise HTTPException(400, "Invalid or expired reset token")
