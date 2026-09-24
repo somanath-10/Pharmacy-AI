@@ -78,11 +78,14 @@ class EventBus:
              "$inc": {"attempts": 1}})
 
     async def _dispatch(self, name: str, payload: dict, actor: dict):
+        """Run handlers, propagating failures (P0 7.2).
+
+        A handler exception must reach the caller so publish()/pump_once()
+        can mark the outbox row retryable instead of DONE. Handlers that
+        must never break the caller should catch their own errors.
+        """
         for handler in self._handlers.get(name, []):
-            try:
-                await handler(payload)
-            except Exception:
-                log.exception("handler failed event=%s handler=%s", name, handler.__name__)
+            await handler(payload)
 
     async def pump_once(self, limit: int = 200) -> int:
         """Process pending outbox rows with atomic claiming.

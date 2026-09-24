@@ -314,41 +314,28 @@ async def record_movement(
                 bal_key, _balance_update(signed, qty, uom, location_id, unit_cost),
                 upsert=True, session=session)
     else:
-        # Fallback (standalone): ledger-first under per-key lock.
+        # Fallback (standalone): balance-guard under per-key lock, then append.
         async with await _locks.lock(_lock_key(org, site, warehouse_id,
                                                product_id, batch_id, status, uom)):
-            await db.db.inventory_movements.insert_one(doc)
             bal_key = _balance_key(org, site, warehouse_id, product_id, batch_id,
                                    status, uom, location_id)
-            try:
-                if signed < 0:
-                    bal_cond = {**bal_key, "quantity": {"$gte": qty}}
-                    bal = await db.db.inventory_balances.find_one_and_update(
-                        bal_cond,
-                        _balance_update(signed, qty, uom, location_id, unit_cost),
-                        upsert=False)
-                    if bal is None:
-                        raise ConflictError(
-                            f"Insufficient stock: cannot decrement {qty} of "
-                            f"{product_id} ({status}) in {warehouse_id}")
-                else:
-                    await db.db.inventory_balances.update_one(
-                        bal_key,
-                        _balance_update(signed, qty, uom, location_id, unit_cost),
-                        upsert=True)
-            except Exception:
-                # No transaction available in this mode: void the staged
-                # movement so the ledger never shows a rejected outflow as
-                # executable history.
-                await db.db.inventory_movements.update_one(
-                    {"movement_id": movement_id, "lifecycle": "PENDING"},
-                    {"$set": {"lifecycle": "VOID",
-                              "void_reason": "balance update failed "
-                                             "(non-transactional fallback)"}})
-                raise
-            await db.db.inventory_movements.update_one(
-                {"movement_id": movement_id, "lifecycle": "PENDING"},
-                {"$set": {"lifecycle": "POSTED"}})
+            if signed < 0:
+                bal_cond = {**bal_key, "quantity": {"$gte": qty}}
+                bal = await db.db.inventory_balances.find_one_and_update(
+                    bal_cond,
+                    _balance_update(signed, qty, uom, location_id, unit_cost),
+                    upsert=False)
+                if bal is None:
+                    raise ConflictError(
+                        f"Insufficient stock: cannot decrement {qty} of "
+                        f"{product_id} ({status}) in {warehouse_id}")
+            else:
+                await db.db.inventory_balances.update_one(
+                    bal_key,
+                    _balance_update(signed, qty, uom, location_id, unit_cost),
+                    upsert=True)
+            doc["lifecycle"] = "POSTED"
+            await db.db.inventory_movements.insert_one(doc)
     await bus.publish("inventory.movement", {
         "movement_id": movement_id, "type": movement_type,
         "product_id": product_id, "batch_id": batch_id,

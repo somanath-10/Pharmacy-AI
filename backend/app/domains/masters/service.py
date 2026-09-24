@@ -64,7 +64,7 @@ async def list_warehouses() -> List[dict]:
 PRODUCT_TYPES = ["FINISHED_GOOD", "RAW_MATERIAL", "PACKAGING_MATERIAL", "TRADE_ITEM"]
 DRUG_SCHEDULES = [None, "H", "H1", "X", "NARCOTIC", "OTC"]
 
-async def create_product(payload: dict) -> dict:
+async def create_product(payload: dict, actor: Optional[dict] = None) -> dict:
     required = ["name", "type", "uom"]
     missing = [k for k in required if not payload.get(k)]
     if missing:
@@ -116,7 +116,7 @@ async def get_product(sku: str) -> dict:
 
 
 # ------------------------------------------------------------------ customers
-async def create_customer(payload: dict) -> dict:
+async def create_customer(payload: dict, actor: Optional[dict] = None) -> dict:
     required = ["name"]
     missing = [k for k in required if not payload.get(k)]
     if missing:

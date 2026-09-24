@@ -112,7 +112,7 @@ READ_KINDS: Dict[str, Set[str]] = {
     "invoice": {"FINANCE", "MANAGEMENT", "AUDITOR", "PROCUREMENT", "SALES",
                 "SUPPLIER", "CUSTOMER"},
     "inventory": {"WAREHOUSE", "QC", "QA", "FINANCE", "PROCUREMENT", "LOGISTICS",
-                  "MANAGEMENT", "SALES", "PLANT", "AUDITOR"},
+                  "MANAGEMENT", "PLANT", "AUDITOR", "SALES"},
     "payment": {"FINANCE", "MANAGEMENT", "AUDITOR", "SUPPLIER"},
     "gl": {"FINANCE", "MANAGEMENT", "AUDITOR"},
     "sales_order": {"SALES", "FINANCE", "WAREHOUSE", "LOGISTICS", "MANAGEMENT",
@@ -270,6 +270,11 @@ def permissions_for(roles: List[str]) -> Set[str]:
 def has_permission(roles: List[str], permission: str) -> bool:
     perms = permissions_for(roles)
     return "*" in perms or permission in perms
+
+
+def can(roles: List[str], resource: str, action: str) -> bool:
+    """Helper for evaluating permission formatted as resource:action."""
+    return has_permission(roles, f"{resource}:{action}")
 
 
 async def sod_violation(identity: str, action: str, entity_key: str) -> bool:
