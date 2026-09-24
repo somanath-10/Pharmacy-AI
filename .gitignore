@@ -22,3 +22,7 @@ dist/
 backend/uploads/*
 !backend/uploads/.gitkeep
 *.log
+*.zip
+.DS_Store
+**/.DS_Store
+
