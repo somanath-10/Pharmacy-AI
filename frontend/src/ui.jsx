@@ -325,10 +325,10 @@ export function Spinner({ label = "Loading…" }) {
 }
 
 /* ── empty state ────────────────────────────────────── */
-export function Empty({ art = "🗂️", title = "No data", note }) {
+export function Empty({ art = "", title = "No data", note }) {
   return (
     <div className="empty">
-      <span className="art">{art}</span>
+      {art && <span className="art">{art}</span>}
       <b>{title}</b>
       {note && <div className="tiny">{note}</div>}
     </div>
@@ -337,12 +337,12 @@ export function Empty({ art = "🗂️", title = "No data", note }) {
 
 export function ErrorBox({ children }) {
   if (!children) return null;
-  return <div className="error-box"><span>⚠️</span><span>{children}</span></div>;
+  return <div className="error-box"><span className="icon">!</span><span>{children}</span></div>;
 }
 
 export function OkBox({ children }) {
   if (!children) return null;
-  return <div className="ok-box"><span>✅</span><span>{children}</span></div>;
+  return <div className="ok-box"><span className="icon">✓</span><span>{children}</span></div>;
 }
 
 /* ── progress bar ───────────────────────────────────── */
@@ -383,7 +383,7 @@ export function Toasts() {
     <div className="toast-host">
       {items.map((t) => (
         <div key={t.id} className={`toast ${t.tone}`}>
-          <span className="t-ico">{t.tone === "ok" ? "✅" : t.tone === "err" ? "⛔" : "ℹ️"}</span>
+          <span className="t-ico">{t.tone === "ok" ? "✓" : t.tone === "err" ? "✕" : "ℹ"}</span>
           {t.msg}
         </div>
       ))}
@@ -413,7 +413,7 @@ export function useToast() {
     <div className="toast-host">
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.tone}`}>
-          <span className="t-ico">{t.tone === "ok" ? "✅" : t.tone === "err" ? "⛔" : "ℹ️"}</span>
+          <span className="t-ico">{t.tone === "ok" ? "✓" : t.tone === "err" ? "✕" : "ℹ"}</span>
           {t.msg}
         </div>
       ))}

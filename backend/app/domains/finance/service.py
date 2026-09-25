@@ -2,11 +2,16 @@
 credit notes, AP payments + authorization, AR + cash application,
 reconciliation, valuation, GL."""
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.database import db, now_iso
+
+
+
+
 from app.core.errors import ConflictError, NotFound, ValidationFailed
 from pymongo.errors import DuplicateKeyError
 from app.core.events import bus
@@ -28,14 +33,14 @@ async def _next_id(name: str, prefix: str) -> str:
 
 
 # ------------------------------------------------------------------ GL engine
-async def post_gl(account: str, debit: float, credit: float, description: str,
+async def post_gl(account: str, debit: Decimal, credit: Decimal, description: str,
                   ref_type: Optional[str] = None, ref_id: Optional[str] = None,
                   actor: Optional[dict] = None):
     """Append-only GL entry."""
     doc = {
         "account": account,
-        "debit": round(float(debit), 2),
-        "credit": round(float(credit), 2),
+        "debit": round(Decimal(str(debit)), 2),
+        "credit": round(Decimal(str(credit)), 2),
         "description": description,
         "ref_type": ref_type,
         "ref_id": ref_id,
@@ -115,13 +120,13 @@ async def receive_supplier_invoice(payload: dict, actor: dict,
         lines = payload.get("lines") or [
             {"line_no": l["line_no"], "quantity": l["quantity"],
              "unit_price": l["unit_price"],
-             "amount": round(float(l["quantity"]) * float(l["unit_price"]), 2)}
+             "amount": round(Decimal(str(l["quantity"])) * Decimal(str(l["unit_price"])), 2)}
             for l in po["lines"]]
-        total = float(payload.get("total_amount") or
-                      sum(float(l.get("amount") or
+        total = Decimal(str(payload.get("total_amount") or
+                      sum(Decimal(str(l.get("amount") or
                                 (float(l.get("quantity") or 0) *
-                                 float(l.get("unit_price") or 0)))
-                          for l in lines))
+                                 float(l.get("unit_price") or 0))))
+                          for l in lines)))
         doc = {
             "invoice_id": invoice_id,
             "supplier_invoice_number": payload.get("supplier_invoice_number",
@@ -190,36 +195,36 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
     po = await db.db.purchase_orders.find_one({"po_id": inv["po_id"]})
     grns = [_clean(dict(g)) async for g in db.db.grns.find({"po_id": inv["po_id"]})]
 
-    tolerance_pct = float(await _get_rule("match_tolerance_pct",
-                                          settings.MATCH_TOLERANCE_PCT))
+    tolerance_pct = Decimal(str(await _get_rule("match_tolerance_pct",
+                                          settings.MATCH_TOLERANCE_PCT)))
     line_results = []
-    total_variance = 0.0
+    total_variance = Decimal('0.0')
     blocked_reasons = []
     for line in inv["lines"]:
         po_line = next((l for l in po["lines"] if l["line_no"] == line["line_no"]), None)
         grn_qty = sum(
-            float(gl["received_qty"]) for g in grns
+            Decimal(str(gl["received_qty"])) for g in grns
             for gl in g.get("lines", []) if gl["line_no"] == line["line_no"])
         qa_qty = sum(
-            float(gl.get("accepted_qty") or 0) for g in grns
+            Decimal(str(gl.get("accepted_qty") or 0)) for g in grns
             for gl in g.get("lines", []) if gl["line_no"] == line["line_no"])
         # QA inspection state: a GRN line is dispositioned only when
         # accepted + rejected == received. QA accepted == 0 with a full
         # rejection IS inspected data (everything was rejected) — it must
         # stay 0. Never fall back to grn_qty when QA accepted is 0.
         qa_inspected = bool(grns) and all(
-            (float(gl.get("accepted_qty") or 0)
-             + float(gl.get("rejected_qty") or 0))
-            >= float(gl["received_qty"]) - 1e-9
+            (Decimal(str(gl.get("accepted_qty") or 0))
+             + Decimal(str(gl.get("rejected_qty") or 0)))
+            >= Decimal(str(gl["received_qty"])) - Decimal('1e-9')
             for g in grns for gl in g.get("lines", [])
             if gl["line_no"] == line["line_no"])
-        inv_qty = float(line.get("quantity") or 0)
-        po_qty = float(po_line["quantity"]) if po_line else 0.0
-        unit_price = float(line.get("unit_price") or
-                           (po_line["unit_price"] if po_line else 0))
-        price_var = 0.0
-        if po_line and abs(unit_price - float(po_line["unit_price"])) > 0.001:
-            price_var = (unit_price - float(po_line["unit_price"])) * inv_qty
+        inv_qty = Decimal(str(line.get("quantity") or 0))
+        po_qty = Decimal(str(po_line["quantity"])) if po_line else Decimal('0.0')
+        unit_price = Decimal(str(line.get("unit_price") or
+                           (po_line["unit_price"] if po_line else 0)))
+        price_var = Decimal('0.0')
+        if po_line and abs(unit_price - Decimal(str(po_line["unit_price"]))) > Decimal('0.001'):
+            price_var = (unit_price - Decimal(str(po_line["unit_price"]))) * inv_qty
         amount_var = price_var
         # 4-way: billed qty vs QA-accepted qty. If QA has not completed
         # inspection of everything received for this line, BLOCK the match —
@@ -242,17 +247,17 @@ async def match_invoice(invoice_id: str, actor: dict) -> dict:
             "price_variance": round(price_var, 2),
             "amount_variance": round(amount_var, 2),
         })
-    tol_amount = abs(float(po.get("total_amount") or 0)) * tolerance_pct / 100
+    tol_amount = abs(Decimal(str(po.get("total_amount") or 0))) * tolerance_pct / 100
     match_type = "FOUR_WAY" if grns else "TWO_WAY"
 
     # credit notes already received offset the remaining variance (supplier corrected)
-    credit_total = 0.0
+    credit_total = Decimal('0.0')
     async for cn in db.db.credit_notes.find({"invoice_id": invoice_id,
                                              "type": "CREDIT"}):
-        credit_total += float(cn.get("amount") or 0)
+        credit_total += Decimal(str(cn.get("amount") or 0))
     net_variance = round(total_variance - credit_total, 2)
     # QA-blocked invoices can never match regardless of variance/credit notes
-    matched = (abs(net_variance) <= max(tol_amount, 0.01)
+    matched = (abs(net_variance) <= max(tol_amount, Decimal('0.01'))
                and not blocked_reasons)
 
     result = {
@@ -308,19 +313,19 @@ async def _agent_investigate_mismatch(invoice_id: str, match_result: dict,
     po = await db.db.purchase_orders.find_one({"po_id": inv["po_id"]})
 
     # 1. Check QA records for rejected quantities explaining the variance
-    qa_rejected = 0.0
+    qa_rejected = Decimal('0.0')
     grns = [_clean(dict(g)) async for g in db.db.grns.find({"po_id": inv["po_id"]})]
     for g in grns:
         for gl in g.get("lines", []):
-            qa_rejected += float(gl.get("rejected_qty") or 0)
-    unit_price = float(inv["lines"][0]["unit_price"]) if inv["lines"] else 0
+            qa_rejected += Decimal(str(gl.get("rejected_qty") or 0))
+    unit_price = Decimal(str(inv["lines"][0]["unit_price"])) if inv["lines"] else 0
     expected_from_rejection = qa_rejected * unit_price
     steps.append({
         "step": "CHECK_QA_RECORDS",
         "found": qa_rejected,
         "detail": f"QA rejected {qa_rejected} units across {len(grns)} GRNs",
     })
-    if qa_rejected > 0 and abs(variance - expected_from_rejection) <= 0.01:
+    if qa_rejected > 0 and abs(variance - expected_from_rejection) <= Decimal('0.01'):
         # 2. Request credit note / corrected invoice from supplier
         task_id = await _next_id("task", "TSK")
         await db.db.agent_tasks.insert_one({
@@ -378,7 +383,7 @@ async def _agent_investigate_mismatch(invoice_id: str, match_result: dict,
 async def apply_credit_note(invoice_id: str, payload: dict, actor: dict) -> dict:
     """Credit note received → adjust invoice → re-run match."""
     inv = await _get_inv(invoice_id)
-    amount = float(payload.get("amount") or 0)
+    amount = Decimal(str(payload.get("amount") or 0))
     if amount <= 0:
         raise ValidationFailed("Credit note amount must be positive")
     note_id = await _next_id("credit_note", "CN")
@@ -432,7 +437,7 @@ async def create_payment_proposal(payload: dict, actor: dict,
                 "status": "APPROVED"})]
             invoice_ids = [r["invoice_id"] for r in rows]
         lines = []
-        total = 0.0
+        total = Decimal('0.0')
         claimed: list[str] = []
         try:
             for iid in invoice_ids:
@@ -458,7 +463,7 @@ async def create_payment_proposal(payload: dict, actor: dict,
                 claimed.append(iid)
                 lines.append({"invoice_id": iid, "vendor_id": inv["vendor_id"],
                               "amount": inv["total_amount"]})
-                total += inv["total_amount"]
+                total += Decimal(str(inv["total_amount"]))
             payment_id = await _next_id("payment", "PAY")
             for line in lines:  # backfill the payment reference on claims
                 await db.db.supplier_invoices.update_one(
@@ -592,7 +597,7 @@ async def apply_cash(payload: dict, actor: dict) -> dict:
     balance. Excess is left unapplied and reported (on-account credit).
     """
     invoice_id = payload.get("invoice_id")
-    amount = float(payload.get("amount") or 0)
+    amount = Decimal(str(payload.get("amount") or 0))
     if amount <= 0:
         raise ValidationFailed("Cash amount must be positive")
     inv = await db.db.customer_invoices.find_one({"invoice_id": invoice_id})
@@ -600,7 +605,7 @@ async def apply_cash(payload: dict, actor: dict) -> dict:
         raise NotFound(f"Customer invoice {invoice_id} not found")
     if inv["status"] not in ("ISSUED", "PARTIALLY_PAID"):
         raise ConflictError(f"Invoice not open: {inv['status']}")
-    balance = round(float(inv.get("balance_amount") or inv["total_amount"]), 2)
+    balance = round(Decimal(str(inv.get("balance_amount") or inv["total_amount"])), 2)
     applied = min(amount, balance)
     unapplied = round(amount - applied, 2)
     new_balance = round(balance - applied, 2)
@@ -645,8 +650,8 @@ async def run_reconciliation(payload: dict, actor: dict) -> dict:
                 "invoice_id": ref, "status": {"$in": ["PAID", "PARTIALLY_PAID"]}})
             if inv:
                 doc = {"type": "CUSTOMER_INVOICE", "id": inv["invoice_id"],
-                       "amount": inv["total_amount"] - float(inv.get("balance_amount") or 0)}
-        if doc and abs(float(doc["amount"]) - abs(float(sl.get("amount") or 0))) <= 0.01:
+                       "amount": inv["total_amount"] - Decimal(str(inv.get("balance_amount") or 0))}
+        if doc and abs(Decimal(str(doc["amount"])) - abs(Decimal(str(sl.get("amount") or 0)))) <= Decimal('0.01'):
             matched.append({"statement_line": sl, "matched_to": doc})
         else:
             unmatched.append(sl)
@@ -671,16 +676,16 @@ async def inventory_valuation(product_id: Optional[str] = None) -> dict:
     if product_id:
         q["product_id"] = product_id
     rows = [_clean(dict(r)) async for r in db.db.inventory_balances.find(q)]
-    total_value = 0.0
+    total_value = Decimal('0.0')
     for r in rows:
-        cost = float(r.get("unit_cost") or 0)
+        cost = Decimal(str(r.get("unit_cost") or 0))
         if not cost:
             # weighted avg from purchase movements
             mv = await db.db.inventory_movements.find_one(
                 {"product_id": r["product_id"], "movement_type": "PURCHASE_RECEIPT",
                  "unit_cost": {"$gt": 0}}, sort=[("created_at", -1)])
-            cost = float((mv or {}).get("unit_cost") or 0)
-        total_value += float(r["quantity"]) * cost
+            cost = Decimal(str((mv or {}).get("unit_cost") or 0))
+        total_value += Decimal(str(r["quantity"])) * cost
     return {"products": len(rows), "total_value": round(total_value, 2)}
 
 
@@ -693,14 +698,14 @@ async def write_off(payload: dict, actor: dict) -> dict:
         .upper() == "EXPIRY" else "DAMAGE",
         product_id=payload["product_id"],
         warehouse_id=payload["warehouse_id"],
-        quantity=float(payload["quantity"]),
+        quantity=Decimal(str(payload["quantity"])),
         batch_id=payload.get("batch_id"),
         reference_type="WRITE_OFF",
         reference_id=payload.get("note", "MANUAL"),
         performed_by=actor,
         note=payload.get("reason"),
     )
-    value = float(payload["quantity"]) * float(payload.get("unit_cost") or 10)
+    value = Decimal(str(payload["quantity"])) * Decimal(str(payload.get("unit_cost") or 10))
     await post_gl("INVENTORY_WRITE_OFF", value, 0,
                   f"Write-off {payload['product_id']}", "MOVEMENT",
                   mv["movement_id"])
@@ -720,7 +725,7 @@ async def issue_debit_note(payload: dict, actor: dict) -> dict:
     inv = await _get_inv(payload["invoice_id"])
     if inv["status"] not in ("MATCH_FAILED", "MATCHED", "DISPUTED"):
         raise ConflictError(f"Invoice not debit-note-eligible: {inv['status']}")
-    amount = round(float(payload.get("amount") or 0), 2)
+    amount = round(Decimal(str(payload.get("amount") or 0)), 2)
     if amount <= 0:
         raise ValidationFailed("Debit note amount must be positive")
     note_id = await _next_id("debit_note", "DN")
@@ -751,13 +756,13 @@ async def issue_debit_note(payload: dict, actor: dict) -> dict:
 
 async def ar_aging() -> dict:
     """Accounts-receivable aging buckets from open customer invoices."""
-    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
-    per_customer: Dict[str, float] = {}
-    open_total = 0.0
+    buckets = {"0-30": Decimal('0.0'), "31-60": Decimal('0.0'), "61-90": Decimal('0.0'), "90+": Decimal('0.0')}
+    per_customer: Dict[str, Decimal] = {}
+    open_total = Decimal('0.0')
     today = datetime.now(timezone.utc).date()
     async for inv in db.db.customer_invoices.find(
             {"status": {"$in": ["ISSUED", "PARTIALLY_PAID"]}}):
-        open_amt = float(inv.get("balance_amount") or inv["total_amount"])
+        open_amt = Decimal(str(inv.get("balance_amount") or inv["total_amount"]))
         due = inv.get("due_date")
         days = 0
         if due:
@@ -820,8 +825,13 @@ async def list_supplier_invoices(status: Optional[str] = None) -> List[dict]:
             db.db.supplier_invoices.find(q).sort("created_at", -1).limit(200)]
 
 
-async def list_customer_invoices(status: Optional[str] = None) -> List[dict]:
-    q = {} if not status else {"status": status}
+async def list_customer_invoices(status: Optional[str] = None,
+                                 customer_id: Optional[str] = None) -> List[dict]:
+    q: Dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    if customer_id:
+        q["customer_id"] = customer_id
     return [_clean(dict(r)) async for r in
             db.db.customer_invoices.find(q).sort("created_at", -1).limit(200)]
 

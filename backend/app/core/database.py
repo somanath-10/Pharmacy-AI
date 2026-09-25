@@ -18,6 +18,23 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
+from bson.codec_options import CodecOptions, TypeRegistry, TypeCodec
+from bson.decimal128 import Decimal128
+from decimal import Decimal
+
+class _DecimalCodec(TypeCodec):
+    python_type = Decimal
+    bson_type = Decimal128
+
+    def transform_python(self, value):
+        return Decimal128(value)
+
+    def transform_bson(self, value):
+        return value.to_decimal()
+
+_codec_options = CodecOptions(type_registry=TypeRegistry([_DecimalCodec()]))
+
 from pymongo import ASCENDING, DESCENDING, read_concern, write_concern
 
 from app.core.config import settings
@@ -57,7 +74,7 @@ class Database:
             appname=settings.APP_NAME,
         )
         await self.client.admin.command("ping")
-        self.db = self.client[settings.MONGODB_DB]
+        self.db = self.client.get_database(settings.MONGODB_DB, codec_options=_codec_options)
         # Detect replica-set capability once; refresh lazily on demand.
         self.tx_support = await self._detect_tx_support()
         try:

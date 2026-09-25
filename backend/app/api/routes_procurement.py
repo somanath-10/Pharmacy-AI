@@ -178,6 +178,12 @@ async def portal_asn(payload: dict = Body(...),
                                                principal)
 
 
+@portal_router.get("/asns")
+async def portal_asns(principal: dict = Depends(get_current_principal)):
+    vendor = await vendors_svc.portal_context(principal)
+    return await vendors_svc.portal_list_asns(vendor["vendor_id"])
+
+
 @portal_router.post("/invoices")
 async def portal_invoice(payload: dict = Body(...),
                          principal: dict = Depends(get_current_principal)):

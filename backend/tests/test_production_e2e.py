@@ -217,6 +217,41 @@ async def test_o2c_duplicate_order_protection(client, seeded):
         "idempotency key must prevent duplicate sales orders"
 
 
+async def test_customer_portal_is_party_scoped(client, seeded):
+    """A customer token only ever sees its own orders and invoices."""
+    from app.core.database import db, now_iso
+    from app.core.security import create_access_token
+
+    admin = auth_header(("SUPER_ADMIN",))
+    customers = (await client.get("/api/masters/customers", headers=admin)).json()
+    own_customer, other_customer = customers[0]["code"], customers[1]["code"]
+    sku = await _sku(client)
+    own_order = (await client.post("/api/sales/orders", headers=admin, json={
+        "customer_id": own_customer, "lines": [{"sku": sku, "quantity": 1}]})).json()
+    other_order = (await client.post("/api/sales/orders", headers=admin, json={
+        "customer_id": other_customer, "lines": [{"sku": sku, "quantity": 1}]})).json()
+    await db.db.customer_invoices.insert_many([
+        {"invoice_id": "INV-PORTAL-OWN", "customer_id": own_customer,
+         "total_amount": 10, "status": "ISSUED", "created_at": now_iso()},
+        {"invoice_id": "INV-PORTAL-OTHER", "customer_id": other_customer,
+         "total_amount": 20, "status": "ISSUED", "created_at": now_iso()},
+    ])
+    token = create_access_token("portal-customer", ["CUSTOMER"],
+                                customer_id=own_customer)
+    customer = {"Authorization": f"Bearer {token}"}
+
+    rows = (await client.get("/api/portal/customer/orders", headers=customer)).json()
+    assert own_order["order_id"] in {row["order_id"] for row in rows}
+    assert all(row["customer_id"] == own_customer for row in rows)
+    invoices = (await client.get("/api/portal/customer/invoices", headers=customer)).json()
+    assert "INV-PORTAL-OWN" in {row["invoice_id"] for row in invoices}
+    assert all(row["customer_id"] == own_customer for row in invoices)
+    assert (await client.get("/api/portal/customer/orders", headers=admin)).status_code == 403
+    denied = await client.get(f"/api/sales/orders/{other_order['order_id']}",
+                              headers=customer)
+    assert denied.status_code == 403
+
+
 # ================================================================ SECURITY
 async def test_unauthenticated_access_blocked(client):
     for path in ["/api/procurement/pos", "/api/finance/gl",

@@ -3,12 +3,44 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
 
+from app.core.errors import PermissionDenied
+from app.core.rbac import assert_party
 from app.core.security import get_current_principal
 from app.domains import crm as crm_svc
 from app.domains import sales as sales_svc
 
-crm_router = APIRouter(prefix="/api/crm", tags=["crm"])
-sales_router = APIRouter(prefix="/api/sales", tags=["sales"])
+def _internal_principal(principal: dict = Depends(get_current_principal)) -> dict:
+    """External identities use their dedicated scoped portal APIs only."""
+    roles = set(principal.get("roles", []))
+    if "SUPER_ADMIN" not in roles and roles & {"SUPPLIER", "CUSTOMER"}:
+        raise PermissionDenied("Use the scoped external portal API")
+    return principal
+
+
+crm_router = APIRouter(prefix="/api/crm", tags=["crm"],
+                       dependencies=[Depends(_internal_principal)])
+sales_router = APIRouter(prefix="/api/sales", tags=["sales"],
+                         dependencies=[Depends(_internal_principal)])
+customer_portal_router = APIRouter(prefix="/api/portal/customer",
+                                   tags=["customer-portal"])
+
+
+def _customer_scope(principal: dict, requested_customer_id: Optional[str] = None
+                    ) -> Optional[str]:
+    """Force external customer requests to their token-bound customer only."""
+    if "CUSTOMER" not in principal.get("roles", []):
+        return requested_customer_id
+    customer_id = principal.get("customer_id")
+    if not customer_id:
+        raise PermissionDenied("Customer identity is missing customer_id")
+    assert_party(principal, customer_id=requested_customer_id or customer_id)
+    return customer_id
+
+
+def _customer_portal_id(principal: dict) -> str:
+    if "CUSTOMER" not in principal.get("roles", []):
+        raise PermissionDenied("Customer portal access requires a CUSTOMER identity")
+    return _customer_scope(principal) or ""
 
 
 # -------------------------------------------------------------------------- CRM
@@ -147,13 +179,54 @@ async def upload_customer_po(customer_id: str = Form(...),
 async def list_orders(status: Optional[str] = Query(None),
                       customer_id: Optional[str] = Query(None),
                       principal: dict = Depends(get_current_principal)):
-    return await sales_svc.list_orders(status, customer_id)
+    return await sales_svc.list_orders(status, _customer_scope(principal, customer_id))
 
 
 @sales_router.get("/orders/{order_id}")
 async def get_order(order_id: str,
                     principal: dict = Depends(get_current_principal)):
-    return await sales_svc.get_order(order_id)
+    order = await sales_svc.get_order(order_id)
+    _customer_scope(principal, order.get("customer_id"))
+    return order
+
+
+# External customer API: read-only, scoped by the customer_id embedded in the
+# access token. Keep this separate from operational sales/logistics routes.
+@customer_portal_router.get("/context")
+async def customer_portal_context(
+        principal: dict = Depends(get_current_principal)):
+    return {"customer_id": _customer_portal_id(principal), "read_only": True}
+
+
+@customer_portal_router.get("/orders")
+async def customer_portal_orders(
+        principal: dict = Depends(get_current_principal)):
+    return await sales_svc.list_orders(customer_id=_customer_portal_id(principal))
+
+
+@customer_portal_router.get("/invoices")
+async def customer_portal_invoices(
+        principal: dict = Depends(get_current_principal)):
+    from app.domains.finance.service import list_customer_invoices
+
+    return await list_customer_invoices(customer_id=_customer_portal_id(principal))
+
+
+@customer_portal_router.get("/shipments")
+async def customer_portal_shipments(
+        principal: dict = Depends(get_current_principal)):
+    from app.core.database import db
+
+    orders = await sales_svc.list_orders(customer_id=_customer_portal_id(principal))
+    order_ids = [order["order_id"] for order in orders]
+    if not order_ids:
+        return []
+    rows = []
+    async for shipment in db.db.shipments.find(
+            {"sales_order_id": {"$in": order_ids}}).sort("created_at", -1).limit(200):
+        shipment.pop("_id", None)
+        rows.append(shipment)
+    return rows
 
 
 @sales_router.post("/orders")
@@ -292,4 +365,3 @@ async def resolve_ticket(ticket_id: str, payload: dict = Body(default={}),
     )
     await audit("CRM", ticket_id, "TICKET_RESOLVED", principal)
     return {"ticket_id": ticket_id, "status": "RESOLVED"}
-

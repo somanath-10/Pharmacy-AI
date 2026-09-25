@@ -3,14 +3,24 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
 
-from app.core.rbac import require_permission
+from app.core.errors import PermissionDenied
+from app.core.rbac import assert_party, require_permission
 from app.core.security import get_current_principal
 from app.domains import compliance as comp_svc
 from app.domains import finance as fin_svc
 from app.domains import reverse as rev_svc
 from app.domains import safety as safety_svc
 
-finance_router = APIRouter(prefix="/api/finance", tags=["finance"])
+def _internal_principal(principal: dict = Depends(get_current_principal)) -> dict:
+    """Supplier/customer traffic is handled by the party-scoped portal APIs."""
+    roles = set(principal.get("roles", []))
+    if "SUPER_ADMIN" not in roles and roles & {"SUPPLIER", "CUSTOMER"}:
+        raise PermissionDenied("Use the scoped external portal API")
+    return principal
+
+
+finance_router = APIRouter(prefix="/api/finance", tags=["finance"],
+                           dependencies=[Depends(_internal_principal)])
 reverse_router = APIRouter(prefix="/api/reverse", tags=["reverse"])
 safety_router = APIRouter(prefix="/api/safety", tags=["safety"])
 compliance_router = APIRouter(prefix="/api/compliance", tags=["compliance"])
@@ -89,7 +99,14 @@ async def execute_payment(payment_id: str, payload: dict = Body(default={}),
 @finance_router.get("/customer-invoices")
 async def customer_invoices(status: Optional[str] = Query(None),
                             principal: dict = Depends(get_current_principal)):
-    return await fin_svc.list_customer_invoices(status)
+    customer_id = principal.get("customer_id")
+    if "CUSTOMER" in principal.get("roles", []):
+        if not customer_id:
+            from app.core.errors import PermissionDenied
+
+            raise PermissionDenied("Customer identity is missing customer_id")
+        assert_party(principal, customer_id=customer_id)
+    return await fin_svc.list_customer_invoices(status, customer_id)
 
 
 @finance_router.post("/cash/apply")

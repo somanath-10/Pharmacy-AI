@@ -592,6 +592,12 @@ async def portal_create_asn(vendor_id: str, payload: dict, actor: dict) -> dict:
     return await create_asn(payload, actor)
 
 
+async def portal_list_asns(vendor_id: str) -> List[dict]:
+    """ASNs visible to exactly one supplier portal identity."""
+    return [_clean(dict(row)) async for row in db.db.asns.find(
+        {"vendor_id": vendor_id}).sort("created_at", -1).limit(200)]
+
+
 async def portal_ack_po(vendor_id: str, po_id: str, payload: dict, actor: dict) -> dict:
     from app.domains.procurement.service import acknowledge_po
 

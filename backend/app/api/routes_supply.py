@@ -3,6 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 
+from app.core.errors import PermissionDenied
 from app.core.rbac import require_command, require_permission, require_read
 from app.core.security import get_current_principal
 from app.domains import inventory as inv_svc
@@ -13,7 +14,16 @@ from app.domains import warehouse as wh_svc
 warehouse_router = APIRouter(prefix="/api/warehouse", tags=["warehouse"])
 inventory_router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 planning_router = APIRouter(prefix="/api/planning", tags=["planning"])
-logistics_router = APIRouter(prefix="/api/logistics", tags=["logistics"])
+def _internal_principal(principal: dict = Depends(get_current_principal)) -> dict:
+    """External identities use party-scoped portal endpoints, never operations APIs."""
+    roles = set(principal.get("roles", []))
+    if "SUPER_ADMIN" not in roles and roles & {"SUPPLIER", "CUSTOMER"}:
+        raise PermissionDenied("Use the scoped external portal API")
+    return principal
+
+
+logistics_router = APIRouter(prefix="/api/logistics", tags=["logistics"],
+                             dependencies=[Depends(_internal_principal)])
 
 
 # -------------------------------------------------------------------- warehouse

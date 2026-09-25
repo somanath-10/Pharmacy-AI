@@ -19,7 +19,7 @@ export default function AuditWorkspace() {
     try {
       const [evts, rcls] = await Promise.all([
         api("/api/audit").catch(() => []),
-        api("/api/recalls").catch(() => []),
+        api("/api/reverse/recalls").catch(() => []),
       ]);
       setEvents(Array.isArray(evts) ? evts : (evts.items || []));
       setRecalls(Array.isArray(rcls) ? rcls : []);

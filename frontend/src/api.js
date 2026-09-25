@@ -82,17 +82,13 @@ export async function api(path, { method = "GET", body, headers = {}, idemKey } 
     const ok = await doRefresh();
     if (ok) return api(path, { method, body, headers, idemKey });
     setAuth(null, null); emit();
-    throw new Error("Session expired");
     throw new Error(extractErrorMessage(data, 401, path));
   }
   if (res.status === 401) {
     if (!path.startsWith("/api/auth/")) { setAuth(null, null); emit(); }
-    throw new Error((data && data.message) || "Session expired");
     throw new Error(extractErrorMessage(data, 401, path));
   }
   if (!res.ok) {
-    const msg = (data && (data.message || data.error)) || `Request failed (${res.status})`;
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
     throw new Error(extractErrorMessage(data, res.status, path));
   }
   return data;

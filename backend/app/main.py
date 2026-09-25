@@ -120,7 +120,11 @@ from app.api.routes_quality import (  # noqa: E402
     qa_router,
     qc_router,
 )
-from app.api.routes_sales import crm_router, sales_router  # noqa: E402
+from app.api.routes_sales import (  # noqa: E402
+    crm_router,
+    customer_portal_router,
+    sales_router,
+)
 from app.api.routes_supply import (  # noqa: E402
     inventory_router,
     logistics_router,
@@ -146,7 +150,7 @@ from app.api.routes_finance import assert_monitoring_tools_registered  # noqa: E
 assert_monitoring_tools_registered()
 
 for r in [auth_router, users_router, masters_router, analytics_router,
-          crm_router, sales_router, planning_router, vendors_router,
+          crm_router, sales_router, customer_portal_router, planning_router, vendors_router,
           portal_router, sourcing_router, procurement_router, logistics_router,
           warehouse_router, inventory_router, qc_router, qa_router,
           production_router, pharmacy_router, finance_router, reverse_router,

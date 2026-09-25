@@ -53,36 +53,36 @@ export function getRoleHome(roles = []) {
 // ── Enterprise Role Navigation Matrix ──
 const NAV_ITEMS = [
   // ── Enterprise Operations ──
-  { to: "/", label: "AI Command Center", ico: "🧠", end: true, roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/executive", label: "Executive Control Tower", ico: "📊", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/supply", label: "Supply Chain Planning", ico: "📆", roles: ["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"], section: "Enterprise Operations" },
-  { to: "/sales", label: "Sales & CRM", ico: "📈", roles: ["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"], section: "Enterprise Operations" },
-  { to: "/vendors", label: "Procurement & Sourcing", ico: "🛒", roles: ["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/warehouse", label: "Warehouse & WMS", ico: "📦", roles: ["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"], section: "Enterprise Operations" },
-  { to: "/quality", label: "QC / LIMS · QA / QMS", ico: "🧪", roles: ["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"], section: "Enterprise Operations" },
-  { to: "/plant", label: "Plant & Production", ico: "🏭", roles: ["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"], section: "Enterprise Operations" },
-  { to: "/engineering", label: "Engineering & Maintenance", ico: "⚙️", roles: ["SUPER_ADMIN", "PLANT", "QC", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/pharmacy", label: "Pharmacy & POS Counter", ico: "💊", roles: ["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/logistics", label: "Logistics & Fleet", ico: "🚚", roles: ["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
-  { to: "/finance", label: "Finance & Accounts", ico: "💰", roles: ["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE"], section: "Enterprise Operations" },
+  { to: "/", label: "AI Command Center", end: true, roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/executive", label: "Executive Control Tower", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/supply", label: "Supply Chain Planning", roles: ["SUPER_ADMIN", "PLANNING", "MANAGEMENT", "PROCUREMENT", "BUYER", "SALES", "WAREHOUSE"], section: "Enterprise Operations" },
+  { to: "/sales", label: "Sales & CRM", roles: ["SUPER_ADMIN", "SALES", "MANAGEMENT", "LOGISTICS", "FINANCE"], section: "Enterprise Operations" },
+  { to: "/vendors", label: "Procurement & Sourcing", roles: ["SUPER_ADMIN", "PROCUREMENT", "BUYER", "VENDOR_MANAGER", "FINANCE", "QA", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/warehouse", label: "Warehouse & WMS", roles: ["SUPER_ADMIN", "WAREHOUSE", "LOGISTICS", "MANAGEMENT", "QC", "PLANNING"], section: "Enterprise Operations" },
+  { to: "/quality", label: "QC / LIMS · QA / QMS", roles: ["SUPER_ADMIN", "QA", "QC", "MANAGEMENT", "COMPLIANCE", "PLANT"], section: "Enterprise Operations" },
+  { to: "/plant", label: "Plant & Production", roles: ["SUPER_ADMIN", "PLANT", "QA", "MANAGEMENT", "PLANNING"], section: "Enterprise Operations" },
+  { to: "/engineering", label: "Engineering & Maintenance", roles: ["SUPER_ADMIN", "PLANT", "QC", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/pharmacy", label: "Pharmacy & POS Counter", roles: ["SUPER_ADMIN", "PHARMACIST", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/logistics", label: "Logistics & Fleet", roles: ["SUPER_ADMIN", "LOGISTICS", "WAREHOUSE", "SALES", "MANAGEMENT"], section: "Enterprise Operations" },
+  { to: "/finance", label: "Finance & Accounts", roles: ["SUPER_ADMIN", "FINANCE", "MANAGEMENT", "AUDITOR", "COMPLIANCE"], section: "Enterprise Operations" },
 
   // ── Common Suite (Internal Roles) ──
-  { to: "/queue", label: "Human Decision Queue", ico: "🙋", pill: "human", roles: "any", section: "Common Suite" },
-  { to: "/exceptions", label: "Exception Center", ico: "⚠️", roles: "any", section: "Common Suite" },
-  { to: "/documents", label: "Document Center & OCR", ico: "📁", roles: "any", section: "Common Suite" },
-  { to: "/workflows", label: "Workflow Timeline", ico: "🔄", roles: "any", section: "Common Suite" },
-  { to: "/agents", label: "Agent Activity Feed", ico: "🤖", roles: "any", section: "Common Suite" },
-  { to: "/sop-training", label: "SOP & Training Matrix", ico: "📖", roles: "any", section: "Common Suite" },
-  { to: "/profile", label: "My Profile & Security", ico: "👤", roles: "any", section: "Common Suite" },
+  { to: "/queue", label: "Human Decision Queue", pill: "human", roles: "any", section: "Common Suite" },
+  { to: "/exceptions", label: "Exception Center", roles: "any", section: "Common Suite" },
+  { to: "/documents", label: "Document Center & OCR", roles: "any", section: "Common Suite" },
+  { to: "/workflows", label: "Workflow Timeline", roles: "any", section: "Common Suite" },
+  { to: "/agents", label: "Agent Activity Feed", roles: "any", section: "Common Suite" },
+  { to: "/sop-training", label: "SOP & Training Matrix", roles: "any", section: "Common Suite" },
+  { to: "/profile", label: "My Profile & Security", roles: "any", section: "Common Suite" },
 
   // ── Governance & Regulation ──
-  { to: "/compliance", label: "Compliance & Regulatory", ico: "📜", roles: ["SUPER_ADMIN", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
-  { to: "/pv", label: "Pharmacovigilance (PV)", ico: "🩺", roles: ["SUPER_ADMIN", "QA", "COMPLIANCE", "PHARMACIST", "MANAGEMENT"], section: "Governance & External" },
-  { to: "/audit", label: "Auditor & Traceability", ico: "🔍", roles: ["SUPER_ADMIN", "AUDITOR", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
-  { to: "/ai-governance", label: "AI Governance & Models", ico: "🛡️", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Governance & External" },
-  { to: "/masters", label: "Master Data Steward", ico: "🗄️", roles: ["SUPER_ADMIN", "MANAGEMENT", "PLANNING", "QA"], section: "Governance & External" },
-  { to: "/portals", label: "External Portals View", ico: "🌐", roles: ["SUPER_ADMIN", "MANAGEMENT", "SUPPLIER", "CUSTOMER"], section: "Governance & External" },
-  { to: "/admin", label: "System Administration", ico: "🛠️", roles: ["SUPER_ADMIN"], section: "Governance & External" },
+  { to: "/compliance", label: "Compliance & Regulatory", roles: ["SUPER_ADMIN", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/pv", label: "Pharmacovigilance (PV)", roles: ["SUPER_ADMIN", "QA", "COMPLIANCE", "PHARMACIST", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/audit", label: "Auditor & Traceability", roles: ["SUPER_ADMIN", "AUDITOR", "COMPLIANCE", "QA", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/ai-governance", label: "AI Governance & Models", roles: ["SUPER_ADMIN", "MANAGEMENT"], section: "Governance & External" },
+  { to: "/masters", label: "Master Data Steward", roles: ["SUPER_ADMIN", "MANAGEMENT", "PLANNING", "QA"], section: "Governance & External" },
+  { to: "/portals", label: "External Portals View", roles: ["SUPER_ADMIN", "MANAGEMENT", "SUPPLIER", "CUSTOMER"], section: "Governance & External" },
+  { to: "/admin", label: "System Administration", roles: ["SUPER_ADMIN"], section: "Governance & External" },
 ];
 
 function visibleNav(me) {
@@ -199,11 +199,8 @@ function Shell({ children, onOpenSearch }) {
     <div className="shell">
       <aside className="sidebar">
         <div className="logo">
-          <div className="logo-badge">✦</div>
-          <div>
-            <b>Pharma AI OS</b>
-            <small>Autonomous Enterprise Core</small>
-          </div>
+          <div className="logo-badge">Pharma AI OS</div>
+          <small>Autonomous Enterprise Core</small>
         </div>
         <div className="sidebar-nav">
           {navWithSections(me).map((n, i) =>
@@ -212,7 +209,6 @@ function Shell({ children, onOpenSearch }) {
             ) : (
               <NavLink key={n.to} to={n.to} end={n.end}
                        className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-                <span className="ico">{n.ico}</span>
                 <span className="nav-label">{n.label}</span>
                 {n.pill === "human" && pending > 0 && <span className="pill">{pending}</span>}
               </NavLink>
@@ -221,7 +217,7 @@ function Shell({ children, onOpenSearch }) {
         </div>
         <div className="sidebar-foot">
           <button className="btn ghost sm" style={{ width: "100%", marginBottom: 8 }} onClick={logout}>
-            ⎋ Sign out
+            Sign out
           </button>
         </div>
       </aside>
@@ -253,7 +249,7 @@ export function Topbar({ title, sub }) {
         onClick={() => window.dispatchEvent(new CustomEvent("open-global-search"))}
         title="Search records across all modules (Cmd+K)"
       >
-        <span>🔍 Search anything...</span>
+        <span>Search...</span>
         <kbd>⌘K</kbd>
       </button>
 
@@ -266,25 +262,25 @@ export function Topbar({ title, sub }) {
           title="Jump to Role Workspace"
         >
           <option value="" disabled>Switch Workspace...</option>
-          <option value="/">🧠 AI Command Center</option>
-          <option value="/executive">📊 Executive Control Tower</option>
-          <option value="/supply">📆 Supply Chain Planning</option>
-          <option value="/sales">📈 Sales & CRM</option>
-          <option value="/vendors">🛒 Procurement & Sourcing</option>
-          <option value="/warehouse">📦 Warehouse & WMS</option>
-          <option value="/quality">🧪 QC & QA Quality</option>
-          <option value="/plant">🏭 Plant & Production</option>
-          <option value="/engineering">⚙️ Engineering & Maint</option>
-          <option value="/pharmacy">💊 Pharmacy & POS</option>
-          <option value="/logistics">🚚 Logistics & Fleet</option>
-          <option value="/finance">💰 Finance & Accounts</option>
-          <option value="/compliance">📜 Compliance & Reg</option>
-          <option value="/pv">🩺 Pharmacovigilance</option>
-          <option value="/audit">🔍 Auditor & Traceability</option>
-          <option value="/ai-governance">🛡️ AI Governance</option>
-          <option value="/masters">🗄️ Master Data Steward</option>
-          <option value="/portals">🌐 External Portals</option>
-          <option value="/admin">🛠️ System Administration</option>
+          <option value="/">AI Command Center</option>
+          <option value="/executive">Executive Control Tower</option>
+          <option value="/supply">Supply Chain Planning</option>
+          <option value="/sales">Sales & CRM</option>
+          <option value="/vendors">Procurement & Sourcing</option>
+          <option value="/warehouse">Warehouse & WMS</option>
+          <option value="/quality">QC / LIMS · QA / QMS</option>
+          <option value="/plant">Plant & Production</option>
+          <option value="/engineering">Engineering & Maintenance</option>
+          <option value="/pharmacy">Pharmacy & POS Counter</option>
+          <option value="/logistics">Logistics & Fleet</option>
+          <option value="/finance">Finance & Accounts</option>
+          <option value="/compliance">Compliance & Regulatory</option>
+          <option value="/pv">Pharmacovigilance (PV)</option>
+          <option value="/audit">Auditor & Traceability</option>
+          <option value="/ai-governance">AI Governance & Models</option>
+          <option value="/masters">Master Data Steward</option>
+          <option value="/portals">External Portals View</option>
+          <option value="/admin">System Administration</option>
         </select>
       )}
 
